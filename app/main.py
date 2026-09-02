@@ -69,9 +69,10 @@ if settings.compat_api_enabled:
     app.include_router(compat_router)
     _startup_logger = logging.getLogger("smart_energy.main")
     _startup_logger.warning("=" * 72)
-    _startup_logger.warning("  프론트엔드 호환 레이어가 켜져 있습니다 (COMPAT_API_ENABLED=true)")
-    _startup_logger.warning("  /auth/login 은 계정 하나를 코드에 박아둔 시연용이며 실제 인증이 아닙니다.")
-    _startup_logger.warning("  공개된 서버에 올리지 마세요. 끄려면 .env 에 COMPAT_API_ENABLED=false")
+    _startup_logger.warning("  프론트엔드 호환 레이어가 켜져 있습니다 (시연용 구성)")
+    _startup_logger.warning("  /auth/login 은 단순화한 시연용 로그인입니다.")
+    _startup_logger.warning("  인터넷에 공개된 서버에는 올리지 마세요.")
+    _startup_logger.warning("  끄려면 .env 에 COMPAT_API_ENABLED=false")
     _startup_logger.warning("=" * 72)
 
 

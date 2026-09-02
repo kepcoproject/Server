@@ -1,5 +1,5 @@
 """
-프론트엔드(kepcoproject/Client) 호환 레이어 — 실험용.
+프론트엔드(kepcoproject/Client) 호환 레이어 — 시연용.
 
 프론트는 이 서버와 다른 규격을 전제로 만들어져 있다.
 
@@ -12,8 +12,11 @@
 같은 데이터를 다시 내보낸다. 화면 세 개(대시보드·추천·헤더 알림)를 띄우는 데
 필요한 만큼만 구현했다.
 
-주의: 로그인은 계정 하나를 코드에 박아둔 실험용이다. 실제 운영에는 사용자 테이블과
-비밀번호 해싱, 서명된 토큰이 필요하다. COMPAT_API_ENABLED=false 로 끌 수 있다.
+로그인은 공모전 시연을 위해 계정 하나를 코드에 두는 방식으로 단순화했다. 교내망이나
+노트북에서 돌리는 시연에는 충분하지만, 인터넷에 공개된 서버에는 올리지 말 것
+(CORS_ORIGINS=* 와 겹쳐 누구나 들어올 수 있다). COMPAT_API_ENABLED=false 로 끌 수 있다.
+
+정식 서비스로 갈 때 교체할 것: 사용자 테이블, 비밀번호 해싱, 서명·만료가 있는 토큰.
 """
 import hashlib
 import hmac
@@ -38,7 +41,7 @@ router = APIRouter(tags=["frontend-compat"])
 
 settings = get_settings()
 
-# 실험용 계정. 프론트 목업과 같은 값이라 화면 수정 없이 바로 로그인된다.
+# 시연용 계정. 프론트 목업과 같은 값이라 화면 수정 없이 바로 로그인된다.
 DEMO_LOGIN_ID = "demo"
 DEMO_PASSWORD = "demo1234"
 DEMO_USER = {
@@ -50,7 +53,7 @@ DEMO_USER = {
 }
 
 # 토큰을 메모리 집합에 들고 있으면 --reload로 서버가 한 번만 재시작해도 로그인이 풀린다.
-# 실험용이므로 만료 없이 고정값을 유도해 쓰고, 검증은 상태 없이 비교만 한다.
+# 시연 범위에서는 만료 없이 고정값을 유도해 쓰고, 검증은 상태 없이 비교만 한다.
 # (운영에서는 만료 시각과 사용자별 서명이 들어간 JWT로 바꿔야 한다)
 _TOKEN_KEY = b"smart-energy-compat-experimental"
 
@@ -146,7 +149,7 @@ def _data_anchor(db: Session) -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# 인증 (실험용)
+# 인증 (시연용)
 # ---------------------------------------------------------------------------
 def current_user(authorization: Optional[str] = Header(default=None)) -> Optional[Dict[str, Any]]:
     if not authorization or not authorization.lower().startswith("bearer "):
