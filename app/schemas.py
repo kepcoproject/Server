@@ -16,6 +16,8 @@ class SensorMetrics(BaseModel):
     occupancy: Optional[bool] = None
     power: Optional[float] = None
     temp: Optional[float] = None
+    # 조도(lux). 재실·전력과 함께 보면 "채광이 충분한데 조명이 켜져 있다"를 잡을 수 있다.
+    lux: Optional[float] = None
 
 
 class SensorDataPayload(BaseModel):

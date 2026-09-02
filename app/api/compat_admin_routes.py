@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from .. import analytics
 from ..config import get_settings
 from ..database import get_db
+from ..mqtt_client import mqtt_service
 from ..models import (
     AppUser,
     ControlCommand,
@@ -383,6 +384,24 @@ async def compat_post_control(
     db.add(command)
     db.commit()
     logger.info("[호환] 제어 접수: %s %s=%s", space.space_id, command.action, command.value)
+
+    # MQTT가 붙어 있으면 즉시 내려보낸다. 노드가 다음 폴링 주기를 기다릴 필요가 없어
+    # 화면의 타임아웃(15초) 안에 결과가 돌아온다.
+    # 실패하거나 MQTT가 꺼져 있으면 노드가 HTTP로 가져가는 경로가 남아 있다.
+    delivered = mqtt_service.publish_command(
+        space.building,
+        space.floor,
+        space.room_id,
+        {
+            "command_id": command.command_id,
+            "action": command.action.lower(),
+            "value": command.value.lower(),
+            "source": command.trigger.lower(),
+            "override_minutes": command.override_minutes,
+        },
+    )
+    if not delivered:
+        logger.debug("MQTT 발행 불가 — 노드의 HTTP 폴링을 기다린다 (%s)", command.command_id)
 
     # 202 Accepted — 접수했다는 뜻이지 실행됐다는 뜻이 아니다.
     return JSONResponse(

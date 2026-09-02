@@ -128,3 +128,79 @@ def test_placeholder_is_absorbed_when_real_device_reports():
         assert devices[0].status.value == "online"
     finally:
         db.close()
+
+
+def test_data_message_stores_lux():
+    """조도는 센서 융합(밝은데 조명 켜짐 판정)에 쓰이므로 저장되어야 한다."""
+    handle_data_message(
+        "v1/lux-a/f1/room-10/data",
+        json.dumps(
+            {
+                "device_id": "LUX-NODE-10",
+                "timestamp": 1790300000,
+                "metrics": {"occupancy": False, "power": 300.0, "lux": 812.5},
+            }
+        ).encode(),
+    )
+    db = SessionLocal()
+    try:
+        reading = (
+            db.query(SensorReading)
+            .filter_by(device_id="LUX-NODE-10")
+            .order_by(SensorReading.id.desc())
+            .first()
+        )
+        assert reading is not None and reading.lux == 812.5
+    finally:
+        db.close()
+
+
+def test_command_ack_completes_command_and_writes_log():
+    """
+    MQTT 노드는 실행 결과를 ack 로 돌려준다. HTTP 폴링과 달리 '가져갔다'가 아니라
+    '실행했다'를 알 수 있으므로 그대로 기록해야 한다.
+    """
+    from app.models import ControlCommand, ControlLog
+    from app.mqtt_handlers import handle_command_ack
+
+    db = SessionLocal()
+    try:
+        db.add(
+            ControlCommand(
+                command_id="cmd-ack-test",
+                space_id="sp-ack",
+                action="LIGHT",
+                value="OFF",
+                trigger="MANUAL",
+                status="PENDING",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    handle_command_ack(
+        "v1/ack-a/f1/room-1/cmd/ack",
+        json.dumps({"command_id": "cmd-ack-test", "result": "COMPLETED"}).encode(),
+    )
+
+    db = SessionLocal()
+    try:
+        command = db.get(ControlCommand, "cmd-ack-test")
+        assert command.status == "COMPLETED"
+        assert command.completed_at is not None
+
+        log = db.query(ControlLog).filter_by(space_id="sp-ack").first()
+        assert log is not None and log.result == "COMPLETED"
+    finally:
+        db.close()
+
+
+def test_command_ack_ignores_unknown_and_malformed():
+    from app.mqtt_handlers import handle_command_ack
+
+    # 예외 없이 조용히 무시되어야 한다 (수신 루프가 죽으면 안 된다)
+    handle_command_ack("v1/a/f/r/cmd/ack", b"{not json")
+    handle_command_ack("v1/a/f/r/cmd/ack", json.dumps({"result": "COMPLETED"}).encode())
+    handle_command_ack("v1/a/f/r/cmd/ack", json.dumps({"command_id": "없는명령"}).encode())
+    handle_command_ack("v1/a/f/r/wrong", json.dumps({"command_id": "x"}).encode())

@@ -1,3 +1,4 @@
+import json
 import logging
 import ssl
 import threading
@@ -6,7 +7,11 @@ import time
 import paho.mqtt.client as mqtt
 
 from .config import get_settings
-from .mqtt_handlers import handle_data_message, handle_status_message
+from .mqtt_handlers import (
+    handle_command_ack,
+    handle_data_message,
+    handle_status_message,
+)
 
 logger = logging.getLogger("smart_energy.mqtt_client")
 
@@ -14,6 +19,13 @@ settings = get_settings()
 
 DATA_TOPIC = f"{settings.mqtt_topic_prefix}/+/+/+/data"
 STATUS_TOPIC = f"{settings.mqtt_topic_prefix}/+/+/+/status"
+# 노드가 명령을 실행한 뒤 결과를 알려주는 토픽. 이게 있어야 '접수'와 '실행'을 구분할 수 있다.
+ACK_TOPIC = f"{settings.mqtt_topic_prefix}/+/+/+/cmd/ack"
+
+
+def command_topic(building: str, floor: str, room_id: str) -> str:
+    """서버가 제어 명령을 내려보내는 토픽."""
+    return f"{settings.mqtt_topic_prefix}/{building}/{floor}/{room_id}/cmd"
 
 
 class MQTTService:
@@ -96,8 +108,8 @@ class MQTTService:
         if reason_code == 0:
             self._connected.set()
             logger.info("MQTT 브로커 연결 성공")
-            client.subscribe([(DATA_TOPIC, 1), (STATUS_TOPIC, 1)])
-            logger.info("토픽 구독 완료: %s, %s", DATA_TOPIC, STATUS_TOPIC)
+            client.subscribe([(DATA_TOPIC, 1), (STATUS_TOPIC, 1), (ACK_TOPIC, 1)])
+            logger.info("토픽 구독 완료: %s, %s, %s", DATA_TOPIC, STATUS_TOPIC, ACK_TOPIC)
         else:
             self._connected.clear()
             logger.error("MQTT 연결 실패 (reason_code=%s)", reason_code)
@@ -111,9 +123,34 @@ class MQTTService:
         else:
             logger.info("MQTT 연결 정상 종료")
 
+    def publish_command(self, building: str, floor: str, room_id: str, command: dict) -> bool:
+        """
+        제어 명령을 노드로 내려보낸다.
+
+        HTTP 폴링 방식은 노드가 다음 주기까지 기다려야 하지만, 이쪽은 즉시 도착한다.
+        브로커에 연결돼 있지 않으면 False 를 돌려주고, 호출자는 폴링 경로에 맡긴다.
+        """
+        if not settings.mqtt_enabled or not self.is_connected():
+            return False
+        topic = command_topic(building, floor, room_id)
+        try:
+            info = self._client.publish(
+                topic,
+                json.dumps(command, ensure_ascii=False),
+                qos=settings.mqtt_command_qos,
+            )
+            ok = info.rc == mqtt.MQTT_ERR_SUCCESS
+            logger.info("제어 발행%s: %s -> %s", "" if ok else " 실패", topic, command)
+            return ok
+        except Exception:
+            logger.exception("제어 명령 발행 중 오류 (topic=%s)", topic)
+            return False
+
     def _on_message(self, client, userdata, msg):
         try:
-            if msg.topic.endswith("/data"):
+            if msg.topic.endswith("/cmd/ack"):
+                handle_command_ack(msg.topic, msg.payload)
+            elif msg.topic.endswith("/data"):
                 handle_data_message(msg.topic, msg.payload)
             elif msg.topic.endswith("/status"):
                 handle_status_message(msg.topic, msg.payload)

@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     mqtt_reconnect_max_delay: int = 120
 
     mqtt_topic_prefix: str = "v1"
+    # 제어 명령을 노드로 내려보낼 때 쓰는 QoS. 1이면 최소 한 번은 도착한다.
+    mqtt_command_qos: int = 1
 
     database_url: str = "sqlite:///./smart_energy.db"
 

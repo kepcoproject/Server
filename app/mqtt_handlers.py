@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from . import analytics
 from .config import get_settings
 from .database import SessionLocal
-from .models import Device, DeviceStatusEnum, SensorReading
+from .models import ControlCommand, ControlLog, Device, DeviceStatusEnum, SensorReading
 from .schemas import SensorDataPayload, StatusPayload
 from .status_cache import status_cache
 from .utils import utcnow
@@ -158,6 +158,7 @@ def handle_data_message(topic: str, raw_payload: bytes) -> None:
             occupancy=payload.metrics.occupancy,
             power=payload.metrics.power,
             temp=payload.metrics.temp,
+            lux=payload.metrics.lux,
             device_timestamp=payload.timestamp,
         )
         db.add(reading)
@@ -315,5 +316,63 @@ def handle_status_message(topic: str, raw_payload: bytes) -> None:
     except Exception:
         db.rollback()
         logger.exception("status 메시지 처리 중 오류 (topic=%s)", topic)
+    finally:
+        db.close()
+
+
+def handle_command_ack(topic: str, raw_payload: bytes) -> None:
+    """
+    노드가 제어 명령을 실행한 뒤 보내는 결과를 처리한다.
+
+    토픽은 v1/{building}/{floor}/{room_id}/cmd/ack 형태다. HTTP 폴링 방식에서는
+    노드가 결과를 알려주지 않아 '가져간 시점'을 실행으로 간주할 수밖에 없었지만,
+    여기서는 실제 실행 여부를 받아 기록한다.
+
+    payload 예: {"command_id": "cmd-abc", "result": "COMPLETED"}
+    """
+    parts = topic.split("/")
+    if len(parts) != 6 or parts[4] != "cmd" or parts[5] != "ack":
+        logger.warning("예상하지 못한 ack 토픽: %s", topic)
+        return
+
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.error("ack 페이로드 파싱 실패 (topic=%s): %s", topic, exc)
+        return
+
+    command_id = payload.get("command_id")
+    if not command_id:
+        logger.warning("ack 에 command_id 가 없습니다 (topic=%s)", topic)
+        return
+
+    result = "COMPLETED" if payload.get("result", "COMPLETED") == "COMPLETED" else "FAILED"
+
+    db = SessionLocal()
+    try:
+        command = db.get(ControlCommand, command_id)
+        if command is None:
+            logger.warning("모르는 명령의 ack: %s", command_id)
+            return
+        if command.status != "PENDING":
+            return  # 이미 처리된 명령(중복 ack)
+
+        now = utcnow()
+        command.status = result
+        command.completed_at = now
+        db.add(
+            ControlLog(
+                space_id=command.space_id,
+                action=command.action,
+                value=command.value,
+                trigger=command.trigger,
+                result=result,
+            )
+        )
+        db.commit()
+        logger.info("제어 결과 수신: %s -> %s", command_id, result)
+    except Exception:
+        db.rollback()
+        logger.exception("ack 처리 중 오류 (topic=%s)", topic)
     finally:
         db.close()
