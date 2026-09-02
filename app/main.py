@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.compat_routes import router as compat_router
 from .api.routes import router as api_router
 from .api.webhook_routes import router as webhook_router
 from .config import get_settings
@@ -62,6 +63,10 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api")
 app.include_router(webhook_router, prefix="/api")
+
+# 프론트엔드는 /auth, /monitoring 처럼 접두사 없이 부르므로 루트에 붙인다.
+if settings.compat_api_enabled:
+    app.include_router(compat_router)
 
 
 @app.get(
