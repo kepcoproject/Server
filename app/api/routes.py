@@ -15,11 +15,18 @@ from ..utils import utcnow
 router = APIRouter(tags=["dashboard"])
 
 
-def _apply_cached_status(device: Device) -> Device:
+def _device_out(device: Device) -> DeviceOut:
+    """
+    캐시된 최신 상태를 씌워 응답 모델을 만든다.
+
+    예전에는 ORM 객체의 status를 직접 바꿨는데, 그건 세션이 autoflush=False라서
+    우연히 DB에 새지 않았을 뿐이다. 조회 요청이 데이터를 건드리지 않도록 분리한다.
+    """
+    out = DeviceOut.model_validate(device)
     cached = status_cache.get_status(device.device_id)
     if cached:
-        device.status = cached["status"]
-    return device
+        out.status = cached["status"]
+    return out
 
 
 def _to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -51,7 +58,7 @@ def list_devices(
         query = query.filter(Device.building == building)
     if floor:
         query = query.filter(Device.floor == floor)
-    return [_apply_cached_status(d) for d in query.all()]
+    return [_device_out(d) for d in query.all()]
 
 
 @router.get(
@@ -65,7 +72,7 @@ def get_device(device_id: str, db: Session = Depends(get_db)):
     device = db.get(Device, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
-    return _apply_cached_status(device)
+    return _device_out(device)
 
 
 @router.get(
@@ -109,7 +116,7 @@ def get_reading_history(
     limit: int = Query(default=100, ge=1, le=1000, description="1~1000건", examples=[100]),
     since: Optional[datetime] = Query(
         default=None,
-        description="이 시각 이후 데이터만 조회. UTC 권장",
+        description="이 시각 이후에 측정된 데이터만 조회. UTC 권장",
         examples=["2026-08-20T00:00:00Z"],
     ),
     db: Session = Depends(get_db),
@@ -117,7 +124,10 @@ def get_reading_history(
     query = db.query(SensorReading).filter_by(building=building, floor=floor, room_id=room_id)
     normalized_since = _to_naive_utc(since)
     if normalized_since:
-        query = query.filter(SensorReading.received_at >= normalized_since)
+        # 정렬은 device_timestamp로 하면서 필터만 received_at으로 걸면 두 시계가 섞여
+        # 결과가 어긋난다. 측정 시각 하나로 통일한다.
+        since_epoch = int(normalized_since.replace(tzinfo=timezone.utc).timestamp())
+        query = query.filter(SensorReading.device_timestamp >= since_epoch)
     return query.order_by(desc(SensorReading.device_timestamp)).limit(limit).all()
 
 

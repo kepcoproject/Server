@@ -52,8 +52,10 @@ class MQTTService:
     def stop(self) -> None:
         self._stopping = True
         try:
-            self._client.loop_stop()
+            # DISCONNECT 패킷을 먼저 보내고, 그 다음 네트워크 루프를 정지한다.
+            # 순서가 반대면 루프가 이미 멈춰 브로커에 종료를 알리지 못한다.
             self._client.disconnect()
+            self._client.loop_stop()
         except Exception:
             logger.exception("MQTT 클라이언트 종료 중 오류")
 

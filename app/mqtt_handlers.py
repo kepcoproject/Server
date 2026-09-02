@@ -27,6 +27,9 @@ logger = logging.getLogger("smart_energy.mqtt_handlers")
 
 settings = get_settings()
 
+# 노드 시계가 이보다 더 틀어져 있으면 NTP 미동기로 보고 서버 시각으로 대체한다.
+MAX_CLOCK_SKEW_SECONDS = 24 * 3600
+
 _last_alert_at: Dict[str, float] = {}
 _alert_lock = threading.Lock()
 
@@ -128,13 +131,24 @@ def handle_data_message(topic: str, raw_payload: bytes) -> None:
         device = _get_or_create_device(db, payload.device_id, info)
         db.flush()  # 새 노드를 먼저 INSERT해, 아래 측정값 재지정의 FK 대상이 존재하게 한다
         _absorb_placeholder(db, device, info)
+        now = utcnow()
         try:
             measured_at = datetime.fromtimestamp(payload.timestamp, tz=timezone.utc).replace(
                 tzinfo=None
             )
         except (OverflowError, OSError, ValueError):
-            measured_at = utcnow()
-        device.last_seen = measured_at
+            measured_at = now
+        if abs((measured_at - now).total_seconds()) > MAX_CLOCK_SKEW_SECONDS:
+            logger.warning(
+                "노드 시계 오차가 큽니다 (device=%s, 노드=%s, 서버=%s). 서버 시각으로 대체합니다.",
+                payload.device_id,
+                measured_at,
+                now,
+            )
+            measured_at = now
+        # last_seen은 '서버가 마지막으로 데이터를 받은 시각'이므로 노드 시계와 무관하게
+        # 서버 시각을 쓴다. 측정 시각은 각 판독값의 device_timestamp에 그대로 남는다.
+        device.last_seen = now
 
         reading = SensorReading(
             device_id=payload.device_id,

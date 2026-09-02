@@ -159,8 +159,11 @@ class WebhookDispatcher:
             finally:
                 self._queue.task_done()
 
-    def _deliver(self, event: WebhookEvent) -> None:
-        body = json.dumps(event.to_body(), ensure_ascii=False, separators=(",", ":"))
+    def _build_headers(self, event: WebhookEvent, body: str) -> Dict[str, str]:
+        """
+        전송 시도마다 새로 만든다. 최초 타임스탬프와 서명을 재시도에 재사용하면,
+        수신자가 타임스탬프 허용 시간을 검사할 때 재시도가 리플레이로 거부된다.
+        """
         timestamp = str(int(time.time()))
         headers = {
             "Content-Type": "application/json",
@@ -173,13 +176,14 @@ class WebhookDispatcher:
             headers["X-Webhook-Signature"] = sign_payload(
                 self._settings.webhook_secret, timestamp, body
             )
+        return headers
 
+    def _deliver(self, event: WebhookEvent) -> None:
+        body = json.dumps(event.to_body(), ensure_ascii=False, separators=(",", ":"))
         for url in self.urls:
-            self._post_with_retry(url, body, headers, event)
+            self._post_with_retry(url, body, event)
 
-    def _post_with_retry(
-        self, url: str, body: str, headers: Dict[str, str], event: WebhookEvent
-    ) -> None:
+    def _post_with_retry(self, url: str, body: str, event: WebhookEvent) -> None:
         max_attempts = max(1, self._settings.webhook_max_retries + 1)
         delay = self._settings.webhook_retry_backoff
         last_error: Optional[str] = None
@@ -189,6 +193,7 @@ class WebhookDispatcher:
         for attempt in range(1, max_attempts + 1):
             attempts_made = attempt
             try:
+                headers = self._build_headers(event, body)
                 resp = self._get_client().post(url, content=body.encode("utf-8"), headers=headers)
                 status_code = resp.status_code
                 if 200 <= resp.status_code < 300:
@@ -214,7 +219,11 @@ class WebhookDispatcher:
                     last_error,
                     delay,
                 )
-                time.sleep(delay)
+                # time.sleep이면 종료 시 최대 60초까지 붙잡혀, join(timeout=5)이 끝난 뒤
+                # httpx 클라이언트가 사용 중에 닫힐 수 있다. 종료 신호를 기다리도록 바꾼다.
+                if self._stopping.wait(delay):
+                    last_error = f"{last_error} (종료로 중단)"
+                    break
                 delay = min(delay * 2, 60)
 
         self._record(event, url, attempts_made, False, status_code, last_error)

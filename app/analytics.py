@@ -177,10 +177,10 @@ def compute_savings(
         return None
 
     period_hours = (end_ts - start_ts) / 3600.0
-    baseline_kwh = (baseline_power_w * period_hours) / 1000.0
 
     # 판독값 사이 평균 전력 x 구간 시간으로 적산 (사다리꼴 근사)
     actual_wh = 0.0
+    covered_hours = 0.0
     for i in range(1, len(readings)):
         prev, cur = readings[i - 1], readings[i]
         dt_h = (cur.device_timestamp - prev.device_timestamp) / 3600.0
@@ -188,13 +188,22 @@ def compute_savings(
             continue
         avg_w = ((prev.power or 0.0) + (cur.power or 0.0)) / 2
         actual_wh += avg_w * dt_h
+        covered_hours += dt_h
 
+    if covered_hours <= 0:
+        return None
+
+    # 기준선은 '요청한 기간' 전체가 아니라 '실제로 측정된 시간'으로 잡는다.
+    # 전체 기간으로 잡으면 데이터가 듬성한 구간에서 절감률이 부풀려진다.
+    # (예: 30일을 요청했는데 하루치만 있으면 29일을 통째로 절감한 것처럼 나온다)
+    baseline_kwh = (baseline_power_w * covered_hours) / 1000.0
     actual_kwh = actual_wh / 1000.0
     saved_kwh = max(baseline_kwh - actual_kwh, 0.0)
     saved_pct = (saved_kwh / baseline_kwh * 100) if baseline_kwh > 0 else 0.0
 
     return {
         "period_hours": round(period_hours, 2),
+        "covered_hours": round(covered_hours, 2),
         "baseline_power_w": baseline_power_w,
         "baseline_kwh": round(baseline_kwh, 3),
         "actual_kwh": round(actual_kwh, 3),

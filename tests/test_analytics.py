@@ -146,3 +146,41 @@ def test_savings_endpoint():
 def test_savings_endpoint_404_without_data():
     with TestClient(app) as client:
         assert client.get("/api/rooms/nowhere/f0/room-000/savings").status_code == 404
+
+
+def test_savings_baseline_uses_measured_time_not_requested_window():
+    """
+    데이터가 듬성한 구간에서 절감률이 부풀려지면 안 된다.
+    30일을 요청해도 실제 측정이 2시간뿐이면 기준선도 2시간치로 잡아야 한다.
+    """
+    db = SessionLocal()
+    base = 1795000000
+    try:
+        db.add(Device(device_id="SPARSE-NODE", building="sp-a", floor="f1", room_id="room-4"))
+        for i in range(3):
+            db.add(
+                SensorReading(
+                    device_id="SPARSE-NODE",
+                    building="sp-a",
+                    floor="f1",
+                    room_id="room-4",
+                    occupancy=False,
+                    power=100.0,
+                    temp=22.0,
+                    device_timestamp=base + i * 3600,
+                )
+            )
+        db.commit()
+
+        start = datetime(1970, 1, 1) + timedelta(seconds=base)
+        result = analytics.compute_savings(
+            db, "sp-a", "f1", "room-4", start, start + timedelta(days=30), baseline_power_w=200.0
+        )
+        assert result is not None
+        assert result["period_hours"] == 720.0  # 요청한 기간
+        assert result["covered_hours"] == 2.0  # 실제 측정된 시간
+        assert result["baseline_kwh"] == 0.4  # 200W x 2h — 720h가 아니어야 한다
+        assert result["actual_kwh"] == 0.2
+        assert result["saved_pct"] == 50.0  # 99%가 아니어야 한다
+    finally:
+        db.close()

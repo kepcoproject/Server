@@ -119,7 +119,11 @@ class SavingsOut(BaseModel):
     building: str = Field(examples=["bldg-a"])
     floor: str = Field(examples=["f2"])
     room_id: str = Field(examples=["room-101"])
-    period_hours: float = Field(description="집계 구간 길이(시간)", examples=[24.0])
+    period_hours: float = Field(description="요청한 구간 길이(시간)", examples=[24.0])
+    covered_hours: float = Field(
+        description="그중 실제로 측정값이 있어 집계에 쓰인 시간. 기준선은 이 값으로 계산한다",
+        examples=[23.5],
+    )
     baseline_power_w: float = Field(
         description="'상시 켜짐' 가정 기준선 전력 (W)", examples=[200.0]
     )
