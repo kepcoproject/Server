@@ -67,6 +67,12 @@ app.include_router(webhook_router, prefix="/api")
 # 프론트엔드는 /auth, /monitoring 처럼 접두사 없이 부르므로 루트에 붙인다.
 if settings.compat_api_enabled:
     app.include_router(compat_router)
+    _startup_logger = logging.getLogger("smart_energy.main")
+    _startup_logger.warning("=" * 72)
+    _startup_logger.warning("  프론트엔드 호환 레이어가 켜져 있습니다 (COMPAT_API_ENABLED=true)")
+    _startup_logger.warning("  /auth/login 은 계정 하나를 코드에 박아둔 시연용이며 실제 인증이 아닙니다.")
+    _startup_logger.warning("  공개된 서버에 올리지 마세요. 끄려면 .env 에 COMPAT_API_ENABLED=false")
+    _startup_logger.warning("=" * 72)
 
 
 @app.get(
