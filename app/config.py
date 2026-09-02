@@ -43,11 +43,6 @@ class Settings(BaseSettings):
     # 절감률 계산의 '상시 켜짐' 기준선 (W)
     analytics_baseline_power_w: float = 200.0
 
-    # ---- 프론트엔드 호환 레이어 (실험용) ----
-    # kepcoproject/Client 가 기대하는 경로·응답 봉투로 같은 데이터를 다시 내보낸다.
-    # 계정 하나를 코드에 박아둔 실험용 로그인이 포함되므로 운영에서는 끌 것.
-    compat_api_enabled: bool = True
-
     app_name: str = "Smart Energy Saving System - Backend"
     log_level: str = "INFO"
     cors_origins: str = "*"

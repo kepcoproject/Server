@@ -4,30 +4,8 @@
     {
       "name": "smart-energy-backend",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": [
-        "-m",
-        "uvicorn",
-        "app.main:app",
-        "--reload",
-        "--port",
-        "8000"
-      ],
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--reload", "--port", "8000"],
       "port": 8000
-    },
-    {
-      "name": "enersave-frontend",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "--prefix",
-        "C:\\Users\\master\\AppData\\Local\\Temp\\claude\\C--Users-master-Desktop-smart-energy-backend\\b88ab754-16ba-4dac-8d3d-0b5e499e25b5\\scratchpad\\Client",
-        "run",
-        "dev",
-        "--",
-        "--port",
-        "5173",
-        "--strictPort"
-      ],
-      "port": 5173
     }
   ]
 }
