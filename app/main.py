@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.compat_admin_routes import router as compat_admin_router
 from .api.compat_common import CompatError, compat_error_handler
 from .api.compat_routes import router as compat_router
+from .api.device_routes import router as device_router
 from .api.routes import router as api_router
 from .api.webhook_routes import router as webhook_router
 from .config import get_settings
@@ -65,6 +66,8 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api")
 app.include_router(webhook_router, prefix="/api")
+# ESP32 노드가 HTTP로 직접 붙는 경로 (/api/sensors/data, /api/spaces/{id}/actuator/latest)
+app.include_router(device_router, prefix="/api")
 
 # 프론트엔드는 /auth, /monitoring 처럼 접두사 없이 부르므로 루트에 붙인다.
 if settings.compat_api_enabled:

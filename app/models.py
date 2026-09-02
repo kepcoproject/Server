@@ -55,6 +55,8 @@ class SensorReading(Base):
     occupancy = Column(Boolean, nullable=True)
     power = Column(Float, nullable=True)
     temp = Column(Float, nullable=True)
+    # ESP32 노드가 조도 센서(LDR) 값을 함께 보낸다. MQTT 경로에서는 비어 있다.
+    lux = Column(Float, nullable=True)
 
     device_timestamp = Column(Integer, nullable=False)
     received_at = Column(DateTime, default=utcnow, nullable=False)

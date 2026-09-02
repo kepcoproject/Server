@@ -19,7 +19,7 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": [
         "--prefix",
-        "C:\\Users\\master\\AppData\\Local\\Temp\\claude\\C--Users-master-Desktop-smart-energy-backend\\b88ab754-16ba-4dac-8d3d-0b5e499e25b5\\scratchpad\\Client",
+        "C:\\Users\\master\\Desktop\\smart-energy-frontend",
         "run",
         "dev",
         "--",

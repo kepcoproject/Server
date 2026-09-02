@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # 절감률 계산의 '상시 켜짐' 기준선 (W)
     analytics_baseline_power_w: float = 200.0
 
+    # ---- 센서 노드 HTTP 수집 ----
+    # ESP32가 CT클램프로 재는 것은 전류(A)라 전력(W)으로 바꾸려면 전압을 곱해야 한다.
+    # 국내 단상 220V 기준. 현장 전압이 다르면 여기서 바꾼다.
+    sensor_line_voltage: float = 220.0
+
     # ---- 프론트엔드 호환 레이어 (시연용) ----
     # kepcoproject/Client 가 기대하는 경로·응답 봉투로 같은 데이터를 다시 내보낸다.
     # 단순화한 로그인이 포함되므로 공개 서버에 올릴 때는 끌 것.
