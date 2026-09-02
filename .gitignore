@@ -1,0 +1,22 @@
+# 파이썬 가상환경 / 캐시
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 실제 설정값 (MQTT 비밀번호, WEBHOOK_SECRET 등이 들어가므로 절대 커밋 금지)
+# 공유가 필요한 항목은 .env.example 에만 적을 것
+.env
+
+# 로컬 SQLite DB
+*.db
+*.sqlite
+*.sqlite3
+
+# 프론트엔드 키트
+node_modules/
+
+# 에디터/OS
+.idea/
+.DS_Store
+Thumbs.db
