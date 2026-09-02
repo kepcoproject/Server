@@ -265,14 +265,19 @@ def compat_occupancy_history(
 def _sync_notifications(db: Session) -> None:
     """
     지금 상태에서 알릴 만한 것을 알림 테이블에 반영한다.
+
+    낭비 판정은 analytics.detect_waste 가 재실·전력·조도를 함께 보고 내린다.
+    대시보드 카드는 공실 낭비만 표시하지만(프론트 문구가 그렇게 고정되어 있다),
+    여기서는 채광 낭비도 정확한 문구로 알릴 수 있다.
+
     같은 내용이 계속 쌓이지 않도록 동일 메시지가 이미 있으면 건너뛴다.
     """
     messages = []
     for r in latest_reading_per_room(db):
-        power_w = r.power or 0.0
-        if not r.occupancy and power_w > WASTE_POWER_W:
+        waste = analytics.detect_waste(r.occupancy, r.power, r.lux)
+        if waste:
             space = ensure_space(db, r.building, r.floor, r.room_id)
-            messages.append(("WARNING", f"{space.code} 공실인데 {power_w:.0f}W 전력 소비 중입니다"))
+            messages.append(("WARNING", f"{space.code} {waste['message']}"))
 
     for device in db.query(Device).filter(Device.status == DeviceStatusEnum.offline).all():
         messages.append(("CRITICAL", f"{device.device_id} 노드가 오프라인입니다"))

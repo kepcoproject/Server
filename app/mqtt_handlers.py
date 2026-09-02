@@ -204,12 +204,19 @@ def _update_analytics(
 def _maybe_emit_energy_waste(
     db: Session, payload: SensorDataPayload, info: TopicInfo, measured_at: datetime
 ) -> None:
-    occupancy = payload.metrics.occupancy
-    power = payload.metrics.power
-    if occupancy is not False or power is None or power < settings.webhook_power_threshold:
+    """
+    낭비를 감지해 웹훅으로 알린다.
+
+    판정은 analytics.detect_waste 가 재실·전력·조도를 함께 보고 내린다.
+    거기에 더해, 평소 이 시간대에 사람이 많은 공간이면 잠깐 자리를 비운 것으로 보고
+    알리지 않는다(오탐 방지).
+    """
+    waste = analytics.detect_waste(
+        payload.metrics.occupancy, payload.metrics.power, payload.metrics.lux
+    )
+    if waste is None:
         return
 
-    # 평소 이 시간대에 사람이 있는 공간이면 잠깐 자리를 비운 것으로 보고 알리지 않는다(오탐 방지).
     probability = None
     recommendation = analytics.RECOMMEND_WARMING_UP
     if settings.analytics_enabled:
@@ -217,12 +224,15 @@ def _maybe_emit_energy_waste(
             probability = analytics.get_probability_now(
                 db, info.building, info.floor, info.room_id, measured_at
             )
-            recommendation = analytics.recommend(occupancy, probability)
+            recommendation = analytics.recommend(payload.metrics.occupancy, probability)
         except Exception:
             logger.exception(
                 "절전 추천 판단 실패 (room=%s/%s/%s)", info.building, info.floor, info.room_id
             )
-        if recommendation == analytics.RECOMMEND_NORMAL:
+        # 공실 낭비만 확률로 걸러낸다. 채광 낭비는 재실 중에도 성립하므로 그대로 알린다.
+        if waste["type"] == analytics.WASTE_UNOCCUPIED and (
+            recommendation == analytics.RECOMMEND_NORMAL
+        ):
             logger.debug(
                 "절전 알림 보류: %s/%s/%s 는 이 시간대 재실 확률이 높음(%.2f)",
                 info.building,
@@ -247,14 +257,16 @@ def _maybe_emit_energy_waste(
             "building": info.building,
             "floor": info.floor,
             "room_id": info.room_id,
-            "occupancy": occupancy,
-            "power": power,
+            "occupancy": payload.metrics.occupancy,
+            "power": payload.metrics.power,
+            "lux": payload.metrics.lux,
             "temp": payload.metrics.temp,
+            "waste_type": waste["type"],
             "threshold": settings.webhook_power_threshold,
             "occupancy_probability": round(probability, 3) if probability is not None else None,
             "recommendation": recommendation,
             "device_timestamp": payload.timestamp,
-            "message": f"{room_key} 공간이 비어 있는데 전력 {power}W가 소모되고 있습니다.",
+            "message": f"{room_key} {waste['message']}",
         },
     )
 

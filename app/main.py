@@ -8,6 +8,7 @@ from .api.compat_admin_routes import router as compat_admin_router
 from .api.compat_common import CompatError, compat_error_handler
 from .api.compat_routes import router as compat_router
 from .api.device_routes import router as device_router
+from .auto_control import auto_control_service
 from .api.routes import router as api_router
 from .api.webhook_routes import router as webhook_router
 from .config import get_settings
@@ -29,7 +30,9 @@ async def lifespan(app: FastAPI):
     init_db()
     webhook_dispatcher.start()
     mqtt_service.start()
+    auto_control_service.start()
     yield
+    auto_control_service.stop()
     mqtt_service.stop()
     webhook_dispatcher.stop()
 

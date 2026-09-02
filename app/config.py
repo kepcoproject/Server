@@ -44,6 +44,20 @@ class Settings(BaseSettings):
     analytics_ema_min_samples: int = 20
     # 절감률 계산의 '상시 켜짐' 기준선 (W)
     analytics_baseline_power_w: float = 200.0
+    # 재실 패턴을 몇 시 기준으로 묶을지. 서버는 UTC로 저장하지만 사람의 생활 패턴은
+    # 현지 시각을 따르므로, 요일·시간대 셀은 현지 기준으로 나눠야 한다.
+    # 한국(KST)은 9. 이 값을 바꾸면 scripts/backfill_analytics.py --reset 로 다시 계산할 것.
+    analytics_utc_offset_hours: int = 9
+
+    # 이 조도(lux) 이상이면 자연광이 충분하다고 본다.
+    # 재실 중이어도 조명을 켜고 있으면 낭비로 잡아낸다 — PIR만으로는 못 잡는 경우다.
+    analytics_daylight_lux: float = 400.0
+
+    # ---- 절전 추천 자동 실행 ----
+    # 적용된 추천의 시간대가 되면 실제로 제어 명령을 낸다.
+    # 그 순간 실제로 비어 있을 때만 끄므로, 사람이 있는 방의 불이 꺼지지는 않는다.
+    auto_control_enabled: bool = True
+    auto_control_interval_seconds: int = 60
 
     # ---- 센서 노드 HTTP 수집 ----
     # ESP32가 CT클램프로 재는 것은 전류(A)라 전력(W)으로 바꾸려면 전압을 곱해야 한다.

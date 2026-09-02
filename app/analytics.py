@@ -19,7 +19,7 @@ smart-energy-system/backend/app/analysis.py 를 현재 스키마에 맞춰 옮�
 방식으로 붙이면 된다 — 인터페이스(공간·요일·시간 -> 확률)는 그대로 유지한다.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -45,6 +45,17 @@ def _to_naive_utc(value: datetime) -> datetime:
     return value
 
 
+def _local(value: datetime) -> datetime:
+    """
+    요일·시간대를 나눌 때 쓰는 현지 시각.
+
+    저장은 UTC로 하지만 "이 공간은 화요일 오후에 비어 있다" 같은 패턴은 사람의
+    생활 시간대를 따른다. UTC로 묶으면 한국 기준 09시가 UTC 00시가 되어,
+    화면에 뜨는 시간대가 실제와 9시간 어긋난다.
+    """
+    return _to_naive_utc(value) + timedelta(hours=settings.analytics_utc_offset_hours)
+
+
 def _to_epoch(value: datetime) -> int:
     return int(_to_naive_utc(value).replace(tzinfo=timezone.utc).timestamp())
 
@@ -58,9 +69,9 @@ def update_occupancy_probability(
     ts: datetime,
 ) -> OccupancyProbability:
     """(공간, 요일, 시간대) 셀의 재실 확률을 새 관측치로 갱신한다. commit은 호출자 몫."""
-    ts = _to_naive_utc(ts)
-    weekday = ts.weekday()  # 0=월 ... 6=일
-    hour = ts.hour
+    local = _local(ts)
+    weekday = local.weekday()  # 0=월 ... 6=일 (현지 기준)
+    hour = local.hour
 
     cell = (
         db.query(OccupancyProbability)
@@ -80,7 +91,7 @@ def update_occupancy_probability(
             hour=hour,
             probability=observed,
             sample_count=1,
-            updated_at=ts,
+            updated_at=_to_naive_utc(ts),
         )
         db.add(cell)
         # 세션이 autoflush=False라 flush하지 않으면 같은 트랜잭션의 다음 조회에서
@@ -97,7 +108,7 @@ def update_occupancy_probability(
             alpha = settings.analytics_ema_alpha
             cell.probability = (1 - alpha) * cell.probability + alpha * observed
         cell.sample_count += 1
-        cell.updated_at = ts
+        cell.updated_at = _to_naive_utc(ts)
 
     return cell
 
@@ -106,15 +117,15 @@ def get_cell(
     db: Session, building: str, floor: str, room_id: str, ts: datetime
 ) -> Optional[OccupancyProbability]:
     """해당 시각이 속한 (요일, 시간대) 셀을 돌려준다. 아직 관측이 없으면 None."""
-    ts = _to_naive_utc(ts)
+    local = _local(ts)
     return (
         db.query(OccupancyProbability)
         .filter_by(
             building=building,
             floor=floor,
             room_id=room_id,
-            weekday=ts.weekday(),
-            hour=ts.hour,
+            weekday=local.weekday(),
+            hour=local.hour,
         )
         .first()
     )
@@ -139,6 +150,51 @@ def recommend(current_occupancy: Optional[bool], probability_now: Optional[float
     if current_occupancy is False and probability_now < settings.analytics_idle_threshold:
         return RECOMMEND_SAVE
     return RECOMMEND_NORMAL
+
+
+# 낭비 유형
+WASTE_UNOCCUPIED = "unoccupied"
+WASTE_DAYLIGHT = "daylight"
+
+
+def detect_waste(
+    occupancy: Optional[bool], power: Optional[float], lux: Optional[float]
+) -> Optional[dict]:
+    """
+    재실·전력·조도 세 센서를 함께 보고 낭비를 판정한다 (센서 융합).
+
+    센서 하나만으로는 못 잡는 것이 있다.
+    - PIR만 보면: 사람이 있으면 무조건 정상으로 판정한다.
+      낮에 창가 자리에서 조명을 켜두는 낭비를 놓친다.
+    - 전력만 보면: 필요해서 쓰는 것과 낭비를 구분할 수 없다.
+
+    돌려주는 값은 유형과 사람이 읽을 메시지다. 낭비가 아니면 None.
+    """
+    if power is None or power < settings.webhook_power_threshold:
+        return None
+
+    # 아무도 없는데 전력을 쓰는 경우가 가장 명백하다.
+    if occupancy is False:
+        return {
+            "type": WASTE_UNOCCUPIED,
+            "message": f"공실인데 전력 {power:.0f}W가 소모되고 있습니다",
+            "power": power,
+            "lux": lux,
+        }
+
+    # 사람이 있어도, 자연광이 충분한데 조명을 켜고 있으면 낭비다.
+    if lux is not None and lux >= settings.analytics_daylight_lux:
+        return {
+            "type": WASTE_DAYLIGHT,
+            "message": (
+                f"자연광이 충분한데({lux:.0f}lux) 전력 {power:.0f}W를 쓰고 있습니다. "
+                "조명을 줄일 수 있습니다"
+            ),
+            "power": power,
+            "lux": lux,
+        }
+
+    return None
 
 
 def compute_savings(
