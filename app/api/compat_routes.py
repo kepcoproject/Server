@@ -1,39 +1,60 @@
 """
-프론트엔드(kepcoproject/Client) 호환 레이어 — 시연용.
+프론트엔드(kepcoproject/Client) 호환 레이어 — 인증 · 대시보드 · 추천 · 알림.
 
-프론트는 이 서버와 다른 규격을 전제로 만들어져 있다.
+프론트는 이 서버와 다른 규격을 전제로 만들어져 있다. 경로가 다르고, 응답을
+{success, data, error} 봉투로 받으며, 공간을 spaceId 하나로 식별하고, 모든 요청에
+Bearer 토큰을 싣는다. 이 모듈은 기존 /api/* 를 그대로 둔 채 그 규격으로 같은
+데이터를 다시 내보낸다.
 
-- 경로가 다르다: /monitoring/occupancy-map vs /api/data/latest
-- 응답을 {success, data, error} 봉투로 받아 data만 꺼내 쓴다
-- 공간을 spaceId 하나로 식별한다 (이 서버는 building/floor/room_id 세 개)
-- 모든 요청에 Bearer 토큰을 싣고, /auth/me가 실패하면 로그인 화면으로 튕긴다
+로그인은 공모전 시연 범위에 맞춰 단순화했다. 교내망이나 노트북에서 도는 시연에는
+충분하지만, 인터넷에 공개된 서버에는 올리지 말 것 (CORS_ORIGINS=* 와 겹쳐 누구나
+들어올 수 있다). COMPAT_API_ENABLED=false 로 끌 수 있다.
 
-이 모듈은 기존 /api/* 엔드포인트를 그대로 둔 채, 프론트가 부르는 모양으로
-같은 데이터를 다시 내보낸다. 화면 세 개(대시보드·추천·헤더 알림)를 띄우는 데
-필요한 만큼만 구현했다.
+정식 서비스로 갈 때 교체할 것: 비밀번호 해싱 강화(현재 SHA-256 단순 해시),
+서명·만료가 있는 토큰.
 
-로그인은 공모전 시연을 위해 계정 하나를 코드에 두는 방식으로 단순화했다. 교내망이나
-노트북에서 돌리는 시연에는 충분하지만, 인터넷에 공개된 서버에는 올리지 말 것
-(CORS_ORIGINS=* 와 겹쳐 누구나 들어올 수 있다). COMPAT_API_ENABLED=false 로 끌 수 있다.
-
-정식 서비스로 갈 때 교체할 것: 사용자 테이블, 비밀번호 해싱, 서명·만료가 있는 토큰.
+공간·디바이스·사용자·제어·리포트는 compat_admin_routes.py 에 있다.
 """
-import hashlib
-import hmac
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+import uuid
+from datetime import timedelta
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Header
-from fastapi.responses import JSONResponse
-from sqlalchemy import desc, func
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from .. import analytics
 from ..config import get_settings
 from ..database import get_db
-from ..models import OccupancyProbability, SensorReading
+from ..models import (
+    AppUser,
+    Device,
+    DeviceStatusEnum,
+    Notification,
+    OccupancyProbability,
+    RecommendationState,
+    SensorReading,
+)
 from ..utils import utcnow
+from .compat_common import (
+    CompatError,
+    data_anchor,
+    derive_token,
+    ensure_demo_user,
+    ensure_space,
+    epoch_to_iso_z,
+    get_space,
+    hash_password,
+    iso_z,
+    latest_reading_per_room,
+    not_found,
+    ok,
+    require_user,
+    to_epoch,
+    unauthorized,
+    user_out,
+)
 
 logger = logging.getLogger("smart_energy.compat")
 
@@ -41,186 +62,133 @@ router = APIRouter(tags=["frontend-compat"])
 
 settings = get_settings()
 
-# 시연용 계정. 프론트 목업과 같은 값이라 화면 수정 없이 바로 로그인된다.
-DEMO_LOGIN_ID = "demo"
-DEMO_PASSWORD = "demo1234"
-DEMO_USER = {
-    "id": "u-1",
-    "loginId": DEMO_LOGIN_ID,
-    "name": "관리자",
-    "email": "demo@enersave.io",
-    "role": "ADMIN",
-}
-
-# 토큰을 메모리 집합에 들고 있으면 --reload로 서버가 한 번만 재시작해도 로그인이 풀린다.
-# 시연 범위에서는 만료 없이 고정값을 유도해 쓰고, 검증은 상태 없이 비교만 한다.
-# (운영에서는 만료 시각과 사용자별 서명이 들어간 JWT로 바꿔야 한다)
-_TOKEN_KEY = b"smart-energy-compat-experimental"
-
-
-def _derive_token(kind: str) -> str:
-    return hmac.new(_TOKEN_KEY, f"{kind}:{DEMO_USER['id']}".encode(), hashlib.sha256).hexdigest()
-
-
-ACCESS_TOKEN = _derive_token("access")
-REFRESH_TOKEN = _derive_token("refresh")
-
 # 재실이 아닌데 이 값을 넘으면 낭비로 본다 (프론트 목업과 동일 기준).
 WASTE_POWER_W = 50.0
 
-
-def ok(data: Any) -> Dict[str, Any]:
-    return {"success": True, "data": data, "error": None}
-
-
-def fail(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={"success": False, "data": None, "error": {"code": code, "message": message}},
-    )
+WEEKDAY_CODES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
 
 # ---------------------------------------------------------------------------
-# spaceId <-> building/floor/room_id 변환
-#
-# 공간 테이블을 새로 만들지 않고 합성 ID로 왕복한다. 프론트는 이 값을 그대로
-# 경로에 넣어 되돌려주므로, 서버가 다시 세 조각으로 풀면 된다.
+# 인증
 # ---------------------------------------------------------------------------
-SPACE_SEP = "~"
+@router.post("/auth/login", summary="[호환] 로그인 (A-01)")
+async def compat_login(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    ensure_demo_user(db)
+    login_id = (payload or {}).get("loginId") or ""
+    password = (payload or {}).get("password") or ""
 
-
-def make_space_id(building: str, floor: str, room_id: str) -> str:
-    return f"{building}{SPACE_SEP}{floor}{SPACE_SEP}{room_id}"
-
-
-def parse_space_id(space_id: str) -> Optional[tuple]:
-    parts = space_id.split(SPACE_SEP)
-    return tuple(parts) if len(parts) == 3 else None
-
-
-def floor_number(floor: str) -> int:
-    digits = "".join(ch for ch in floor if ch.isdigit())
-    return int(digits) if digits else 0
-
-
-def _latest_per_room(db: Session) -> List[SensorReading]:
-    """공간별 최신 측정값 1건씩. /api/data/latest 와 같은 방식."""
-    latest = (
-        db.query(
-            SensorReading.building.label("building"),
-            SensorReading.floor.label("floor"),
-            SensorReading.room_id.label("room_id"),
-            func.max(SensorReading.device_timestamp).label("device_timestamp"),
-        )
-        .group_by(SensorReading.building, SensorReading.floor, SensorReading.room_id)
-        .subquery()
-    )
-    rows = (
-        db.query(SensorReading)
-        .join(
-            latest,
-            (SensorReading.building == latest.c.building)
-            & (SensorReading.floor == latest.c.floor)
-            & (SensorReading.room_id == latest.c.room_id)
-            & (SensorReading.device_timestamp == latest.c.device_timestamp),
-        )
-        .all()
-    )
-    seen, out = set(), []
-    for row in rows:
-        key = (row.building, row.floor, row.room_id)
-        if key not in seen:
-            seen.add(key)
-            out.append(row)
-    return out
-
-
-def _data_anchor(db: Session) -> datetime:
-    """
-    '오늘'의 기준 시각. 보통은 현재 시각이지만, 데모 DB처럼 데이터가 과거에 멈춰 있으면
-    화면이 전부 0으로 보이므로 가장 최근 측정 시각을 기준으로 삼는다.
-    """
-    newest = db.query(func.max(SensorReading.device_timestamp)).scalar()
-    now = utcnow()
-    if newest is None:
-        return now
-    newest_dt = datetime.fromtimestamp(newest, tz=timezone.utc).replace(tzinfo=None)
-    return now if newest_dt > now - timedelta(hours=24) else newest_dt
-
-
-# ---------------------------------------------------------------------------
-# 인증 (시연용)
-# ---------------------------------------------------------------------------
-def current_user(authorization: Optional[str] = Header(default=None)) -> Optional[Dict[str, Any]]:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return None
-    token = authorization.split(" ", 1)[1].strip()
-    return DEMO_USER if hmac.compare_digest(token, ACCESS_TOKEN) else None
-
-
-@router.post("/auth/login", summary="[호환] 로그인")
-async def compat_login(payload: Dict[str, Any]):
-    login_id = (payload or {}).get("loginId")
-    password = (payload or {}).get("password")
-    if login_id != DEMO_LOGIN_ID or password != DEMO_PASSWORD:
-        return fail(401, "E4010", "아이디 또는 비밀번호가 올바르지 않습니다")
+    user = db.query(AppUser).filter_by(login_id=login_id).first()
+    if user is None or user.password_hash != hash_password(password):
+        raise unauthorized("아이디 또는 비밀번호가 올바르지 않습니다")
+    if user.status != "ACTIVE":
+        raise CompatError(403, "E4030", "승인 대기 중인 계정입니다. 관리자에게 문의하세요")
 
     logger.info("[호환] 로그인: %s", login_id)
-    return ok({"accessToken": ACCESS_TOKEN, "refreshToken": REFRESH_TOKEN, "user": DEMO_USER})
+    return ok(
+        {
+            "accessToken": derive_token("access", user.user_id),
+            "refreshToken": derive_token("refresh", user.user_id),
+            "user": user_out(user),
+        }
+    )
 
 
-@router.post("/auth/refresh", summary="[호환] 토큰 갱신")
-async def compat_refresh(payload: Dict[str, Any]):
+@router.post("/auth/refresh", summary="[호환] 토큰 갱신 (A-02)")
+async def compat_refresh(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    ensure_demo_user(db)
     supplied = (payload or {}).get("refreshToken") or ""
-    if not hmac.compare_digest(supplied, REFRESH_TOKEN):
-        return fail(401, "E4010", "리프레시 토큰이 유효하지 않습니다")
-    return ok({"accessToken": ACCESS_TOKEN, "refreshToken": REFRESH_TOKEN})
+    for user in db.query(AppUser).filter(AppUser.status == "ACTIVE").all():
+        if supplied == derive_token("refresh", user.user_id):
+            return ok(
+                {
+                    "accessToken": derive_token("access", user.user_id),
+                    "refreshToken": derive_token("refresh", user.user_id),
+                }
+            )
+    raise unauthorized("리프레시 토큰이 유효하지 않습니다")
 
 
-@router.get("/auth/me", summary="[호환] 내 정보")
-def compat_me(user: Optional[Dict[str, Any]] = Depends(current_user)):
-    if user is None:
-        return fail(401, "E4010", "로그인이 필요합니다")
-    return ok(user)
+@router.get("/auth/me", summary="[호환] 내 정보 (A-04)")
+def compat_me(user: AppUser = Depends(require_user)):
+    return ok(user_out(user))
+
+
+@router.post("/auth/signup", summary="[호환] 회원가입 (A-05)")
+async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    body = payload or {}
+    login_id = (body.get("loginId") or "").strip()
+    if not login_id:
+        raise CompatError(400, "E4000", "아이디를 입력하세요")
+    if db.query(AppUser).filter_by(login_id=login_id).first():
+        raise CompatError(409, "E4090", "이미 사용 중인 아이디입니다")
+
+    user = AppUser(
+        user_id=f"u-{uuid.uuid4().hex[:8]}",
+        login_id=login_id,
+        name=(body.get("name") or login_id),
+        email=(body.get("email") or ""),
+        role="MEMBER",
+        # 가입은 즉시 사용이 아니라 관리자 승인 대기 상태로 들어간다.
+        status="PENDING",
+        password_hash=hash_password(body.get("password") or ""),
+    )
+    db.add(user)
+    db.commit()
+    logger.info("[호환] 회원가입 신청: %s", login_id)
+    return ok({"userId": user.user_id, "status": user.status})
+
+
+@router.get("/auth/check-id", summary="[호환] 아이디 중복 확인 (A-06)")
+def compat_check_id(loginId: str = Query(...), db: Session = Depends(get_db)):
+    ensure_demo_user(db)
+    taken = db.query(AppUser).filter_by(login_id=loginId).first() is not None
+    return ok({"available": not taken})
+
+
+@router.patch("/auth/password", summary="[호환] 비밀번호 변경")
+async def compat_change_password(
+    payload: Dict[str, Any], user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+):
+    body = payload or {}
+    if user.password_hash != hash_password(body.get("currentPassword") or ""):
+        raise CompatError(400, "E4001", "현재 비밀번호가 올바르지 않습니다")
+    new_password = body.get("newPassword") or ""
+    if len(new_password) < 8:
+        raise CompatError(400, "E4002", "새 비밀번호는 8자 이상이어야 합니다")
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    return ok({"changed": True})
 
 
 # ---------------------------------------------------------------------------
 # 대시보드
 # ---------------------------------------------------------------------------
 @router.get("/monitoring/occupancy-map", summary="[호환] 재실 맵 (E-01)")
-def compat_occupancy_map(
-    user: Optional[Dict[str, Any]] = Depends(current_user), db: Session = Depends(get_db)
-):
-    if user is None:
-        return fail(401, "E4010", "로그인이 필요합니다")
-
+def compat_occupancy_map(user: AppUser = Depends(require_user), db: Session = Depends(get_db)):
     spaces = []
-    for r in _latest_per_room(db):
+    for r in latest_reading_per_room(db):
+        space = ensure_space(db, r.building, r.floor, r.room_id)
         power_w = r.power or 0.0
         occupied = bool(r.occupancy)
         spaces.append(
             {
-                "spaceId": make_space_id(r.building, r.floor, r.room_id),
-                "code": r.room_id.upper(),
-                "name": f"{r.building} {r.floor} {r.room_id}",
-                "floor": floor_number(r.floor),
+                "spaceId": space.space_id,
+                "code": space.code,
+                "name": space.name,
+                "floor": space.floor_number,
                 "occupied": occupied,
                 "powerW": round(power_w, 1),
                 "wasteFlag": (not occupied) and power_w > WASTE_POWER_W,
             }
         )
+    db.commit()
     return ok({"spaces": spaces})
 
 
 @router.get("/monitoring/realtime-power", summary="[호환] 실시간 전력 (E-03)")
-def compat_realtime_power(
-    user: Optional[Dict[str, Any]] = Depends(current_user), db: Session = Depends(get_db)
-):
-    if user is None:
-        return fail(401, "E4010", "로그인이 필요합니다")
-
+def compat_realtime_power(user: AppUser = Depends(require_user), db: Session = Depends(get_db)):
     total_w = waste_w = 0.0
-    for r in _latest_per_room(db):
+    for r in latest_reading_per_room(db):
         power_w = r.power or 0.0
         total_w += power_w
         if not r.occupancy:
@@ -229,17 +197,12 @@ def compat_realtime_power(
 
 
 @router.get("/monitoring/savings", summary="[호환] 절감량 (E-04)")
-def compat_savings(
-    user: Optional[Dict[str, Any]] = Depends(current_user), db: Session = Depends(get_db)
-):
-    if user is None:
-        return fail(401, "E4010", "로그인이 필요합니다")
-
-    end = _data_anchor(db)
+def compat_savings(user: AppUser = Depends(require_user), db: Session = Depends(get_db)):
+    end = data_anchor(db)
     start = end - timedelta(hours=24)
 
     saved_wh = baseline_wh = 0.0
-    for r in _latest_per_room(db):
+    for r in latest_reading_per_room(db):
         result = analytics.compute_savings(db, r.building, r.floor, r.room_id, start, end)
         if result:
             saved_wh += result["saved_kwh"] * 1000
@@ -249,54 +212,132 @@ def compat_savings(
     return ok({"todaySavingWh": round(saved_wh), "savingRate": round(rate, 4)})
 
 
-@router.get("/notifications", summary="[호환] 알림 목록 (H-02)")
-def compat_notifications(user: Optional[Dict[str, Any]] = Depends(current_user)):
-    if user is None:
-        return fail(401, "E4010", "로그인이 필요합니다")
-    # 이 서버의 알림은 아웃바운드 웹훅(서버 -> 서버)이라 브라우저가 받을 수 없다.
-    # 헤더의 벨 아이콘이 깨지지 않도록 빈 목록을 돌려준다.
-    return ok({"items": [], "unreadCount": 0})
+def occupied_periods(db: Session, space, hours: int):
+    """
+    재실이 연속으로 true 인 구간을 묶어 [{start, end}] 로 만든다.
+    그래프에서 재실 구간을 음영으로 칠하는 데 쓰인다.
+    """
+    end_dt = data_anchor(db)
+    start_ts = to_epoch(end_dt) - hours * 3600
+    rows = (
+        db.query(SensorReading)
+        .filter(
+            SensorReading.building == space.building,
+            SensorReading.floor == space.floor,
+            SensorReading.room_id == space.room_id,
+            SensorReading.device_timestamp >= start_ts,
+        )
+        .order_by(SensorReading.device_timestamp)
+        .all()
+    )
+
+    periods, run_start, prev_ts = [], None, None
+    for row in rows:
+        if row.occupancy:
+            if run_start is None:
+                run_start = row.device_timestamp
+        elif run_start is not None:
+            periods.append(
+                {"start": epoch_to_iso_z(run_start), "end": epoch_to_iso_z(prev_ts or run_start)}
+            )
+            run_start = None
+        prev_ts = row.device_timestamp
+    if run_start is not None and prev_ts is not None:
+        periods.append({"start": epoch_to_iso_z(run_start), "end": epoch_to_iso_z(prev_ts)})
+    return periods
 
 
-# ---------------------------------------------------------------------------
-# 절전 추천 — 재실 확률 테이블에서 만들어낸다
-# ---------------------------------------------------------------------------
-WEEKDAY_CODES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
-
-
-@router.get("/recommendations", summary="[호환] 절전 추천 목록 (F-01)")
-def compat_recommendations(
-    user: Optional[Dict[str, Any]] = Depends(current_user), db: Session = Depends(get_db)
+@router.get("/monitoring/occupancy-history/{space_id}", summary="[호환] 재실 이력 (E-02)")
+def compat_occupancy_history(
+    space_id: str,
+    hours: int = Query(default=1, ge=1, le=720),
+    interval: str = Query(default="1m"),
+    user: AppUser = Depends(require_user),
+    db: Session = Depends(get_db),
 ):
-    if user is None:
-        return fail(401, "E4010", "로그인이 필요합니다")
+    space = get_space(db, space_id)
+    return ok({"periods": occupied_periods(db, space, hours)})
 
+
+# ---------------------------------------------------------------------------
+# 알림 (H-02)
+# ---------------------------------------------------------------------------
+def _sync_notifications(db: Session) -> None:
+    """
+    지금 상태에서 알릴 만한 것을 알림 테이블에 반영한다.
+    같은 내용이 계속 쌓이지 않도록 동일 메시지가 이미 있으면 건너뛴다.
+    """
+    messages = []
+    for r in latest_reading_per_room(db):
+        power_w = r.power or 0.0
+        if not r.occupancy and power_w > WASTE_POWER_W:
+            space = ensure_space(db, r.building, r.floor, r.room_id)
+            messages.append(("WARNING", f"{space.code} 공실인데 {power_w:.0f}W 전력 소비 중입니다"))
+
+    for device in db.query(Device).filter(Device.status == DeviceStatusEnum.offline).all():
+        messages.append(("CRITICAL", f"{device.device_id} 노드가 오프라인입니다"))
+
+    existing = {row[0] for row in db.query(Notification.message).all()}
+    for level, message in messages:
+        if message not in existing:
+            db.add(Notification(level=level, message=message))
+    db.commit()
+
+
+@router.get("/notifications", summary="[호환] 알림 목록 (H-02)")
+def compat_notifications(user: AppUser = Depends(require_user), db: Session = Depends(get_db)):
+    _sync_notifications(db)
+    rows = db.query(Notification).order_by(desc(Notification.created_at)).limit(30).all()
+    items = [
+        {
+            "notificationId": f"ntf-{n.notification_id}",
+            "level": n.level,
+            "message": n.message,
+            "createdAt": iso_z(n.created_at),
+            "read": n.read,
+        }
+        for n in rows
+    ]
+    return ok({"items": items, "unreadCount": sum(1 for n in rows if not n.read)})
+
+
+# ---------------------------------------------------------------------------
+# 절전 추천 (F-01, F-02) — 재실 확률 테이블에서 생성한다
+# ---------------------------------------------------------------------------
+def _build_recommendations(db: Session):
     threshold = settings.analytics_idle_threshold
     cells = (
         db.query(OccupancyProbability)
         .filter(OccupancyProbability.probability < threshold)
         .order_by(OccupancyProbability.probability, desc(OccupancyProbability.sample_count))
-        .limit(20)
+        .limit(30)
         .all()
     )
 
     items = []
-    for i, cell in enumerate(cells, start=1):
-        # 그 시간대에 실제로 얼마나 쓰는지를 절감 기대치로 쓴다.
-        avg_power = (
-            db.query(func.avg(SensorReading.power))
+    for cell in cells:
+        space = ensure_space(db, cell.building, cell.floor, cell.room_id)
+        rec_id = f"rec-{cell.id}"
+        state = db.get(RecommendationState, rec_id)
+
+        # 그 공간의 평균 전력을 절감 기대치로 쓴다 (1시간 켜져 있었다고 가정).
+        samples = (
+            db.query(SensorReading.power)
             .filter(
                 SensorReading.building == cell.building,
                 SensorReading.floor == cell.floor,
                 SensorReading.room_id == cell.room_id,
+                SensorReading.power.isnot(None),
             )
-            .scalar()
-            or 0.0
+            .limit(200)
+            .all()
         )
+        avg_w = sum(s[0] for s in samples) / len(samples) if samples else 0.0
+
         items.append(
             {
-                "recommendationId": f"rec-{cell.id}",
-                "spaceId": make_space_id(cell.building, cell.floor, cell.room_id),
+                "recommendationId": rec_id,
+                "spaceId": space.space_id,
                 "days": [WEEKDAY_CODES[cell.weekday]],
                 "startTime": f"{cell.hour:02d}:00",
                 "endTime": f"{(cell.hour + 1) % 24:02d}:00",
@@ -307,8 +348,59 @@ def compat_recommendations(
                     f"{cell.probability * 100:.0f}%"
                 ),
                 "confidence": round(1.0 - cell.probability, 2),
-                "expectedSavingWh": round(avg_power),
-                "status": "PENDING",
+                "expectedSavingWh": round(avg_w),
+                "status": state.status if state else "PENDING",
+                "scheduleId": state.schedule_id if state else None,
+                "comment": state.comment if state else None,
             }
         )
-    return ok({"items": items})
+    db.commit()
+    return items
+
+
+@router.get("/recommendations", summary="[호환] 절전 추천 목록 (F-01)")
+def compat_recommendations(user: AppUser = Depends(require_user), db: Session = Depends(get_db)):
+    return ok({"items": _build_recommendations(db)})
+
+
+def _set_recommendation_state(
+    db: Session, rec_id: str, status: str, comment: Optional[str] = None
+) -> RecommendationState:
+    cell_id = rec_id.replace("rec-", "", 1)
+    if not cell_id.isdigit() or db.get(OccupancyProbability, int(cell_id)) is None:
+        raise not_found("추천을 찾을 수 없습니다")
+
+    state = db.get(RecommendationState, rec_id)
+    if state is None:
+        state = RecommendationState(recommendation_id=rec_id)
+        db.add(state)
+    state.status = status
+    state.comment = comment
+    state.schedule_id = f"sch-{cell_id}" if status == "APPLIED" else None
+    state.updated_at = utcnow()
+    db.commit()
+    return state
+
+
+@router.post("/recommendations/{rec_id}/apply", summary="[호환] 추천 적용 (F-02)")
+def compat_apply_recommendation(
+    rec_id: str, user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+):
+    state = _set_recommendation_state(db, rec_id, "APPLIED")
+    logger.info("[호환] 추천 적용: %s", rec_id)
+    return ok(
+        {"recommendationId": rec_id, "status": state.status, "scheduleId": state.schedule_id}
+    )
+
+
+@router.post("/recommendations/{rec_id}/reject", summary="[호환] 추천 반려 (F-02)")
+async def compat_reject_recommendation(
+    rec_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+    user: AppUser = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    comment = (payload or {}).get("comment")
+    state = _set_recommendation_state(db, rec_id, "REJECTED", comment)
+    logger.info("[호환] 추천 반려: %s", rec_id)
+    return ok({"recommendationId": rec_id, "status": state.status, "comment": state.comment})

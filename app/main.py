@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.compat_admin_routes import router as compat_admin_router
+from .api.compat_common import CompatError, compat_error_handler
 from .api.compat_routes import router as compat_router
 from .api.routes import router as api_router
 from .api.webhook_routes import router as webhook_router
@@ -66,7 +68,10 @@ app.include_router(webhook_router, prefix="/api")
 
 # 프론트엔드는 /auth, /monitoring 처럼 접두사 없이 부르므로 루트에 붙인다.
 if settings.compat_api_enabled:
+    # 실패 응답도 {success, data, error} 봉투로 나가야 프론트가 error.code 로 분기한다.
+    app.add_exception_handler(CompatError, compat_error_handler)
     app.include_router(compat_router)
+    app.include_router(compat_admin_router)
     _startup_logger = logging.getLogger("smart_energy.main")
     _startup_logger.warning("=" * 72)
     _startup_logger.warning("  프론트엔드 호환 레이어가 켜져 있습니다 (시연용 구성)")
