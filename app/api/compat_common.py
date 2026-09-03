@@ -4,10 +4,13 @@
 프론트는 모든 응답을 {success, data, error} 로 받고 실패 시 error.code 로 분기한다.
 엔드포인트가 30개 가까이 되므로 인증 확인을 매번 되풀이하지 않도록 예외로 처리한다.
 """
+import base64
 import hashlib
 import hmac
+import json
 import logging
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, Header, Request
@@ -15,28 +18,117 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..database import get_db
 from ..models import AppUser, SensorReading, Space
 from ..utils import utcnow
 
 logger = logging.getLogger("smart_energy.compat")
 
-# 시연용 계정. 프론트 목업과 같은 값이라 화면 수정 없이 로그인된다.
+# 시연용 계정. auth_demo_account 가 켜져 있을 때만 만들어진다.
 DEMO_LOGIN_ID = "demo"
 DEMO_PASSWORD = "demo1234"
 
-# 시연 범위에서는 만료 없이 고정값을 유도해 쓴다. 검증은 상태 없이 비교만 하므로
-# 서버를 재시작해도 로그인이 풀리지 않는다.
-# 정식 서비스에서는 서명·만료가 있는 토큰으로 교체할 것.
-_TOKEN_KEY = b"smart-energy-compat-demo"
+_PBKDF2_ITERATIONS = 200_000
+
+# 토큰 서명 키. 설정이 없으면 기동할 때마다 새로 만든다(재시작하면 세션이 끊긴다).
+# 공개 배포에서는 AUTH_SECRET 을 반드시 지정할 것.
+_secret = get_settings().auth_secret
+if not _secret:
+    _secret = secrets.token_urlsafe(32)
+    logging.getLogger("smart_energy.compat").warning(
+        "AUTH_SECRET 이 설정되지 않아 임시 키를 생성했습니다. "
+        "서버를 재시작하면 로그인이 모두 풀립니다. 배포 시에는 .env 에 지정하세요."
+    )
+_TOKEN_KEY = _secret.encode("utf-8")
 
 
-def derive_token(kind: str, user_id: str) -> str:
-    return hmac.new(_TOKEN_KEY, f"{kind}:{user_id}".encode(), hashlib.sha256).hexdigest()
+# ---------------------------------------------------------------------------
+# 비밀번호
+#
+# PBKDF2-HMAC-SHA256 으로 사용자마다 다른 소금을 섞어 저장한다.
+# 예전에는 SHA-256 한 번이라 대입 공격에 약했다. 기존 해시도 읽을 수 있게 해두고,
+# 그 계정이 로그인에 성공하면 새 형식으로 조용히 갈아끼운다.
+# ---------------------------------------------------------------------------
+def hash_password(raw: str, salt: Optional[bytes] = None) -> str:
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", raw.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
 
 
-def hash_password(raw: str) -> str:
+def _legacy_hash(raw: str) -> str:
     return hashlib.sha256(f"smart-energy:{raw}".encode()).hexdigest()
+
+
+def verify_password(raw: str, stored: str) -> bool:
+    if not stored:
+        return False
+    if stored.startswith("pbkdf2$"):
+        try:
+            _, iterations, salt_hex, digest_hex = stored.split("$")
+            digest = hashlib.pbkdf2_hmac(
+                "sha256", raw.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations)
+            )
+            return hmac.compare_digest(digest.hex(), digest_hex)
+        except (ValueError, TypeError):
+            return False
+    # 옛 형식(소금 없는 SHA-256)
+    return hmac.compare_digest(_legacy_hash(raw), stored)
+
+
+def needs_rehash(stored: str) -> bool:
+    return not stored.startswith("pbkdf2$")
+
+
+# ---------------------------------------------------------------------------
+# 토큰
+#
+# 만료 시각을 담고 서명한다. 예전에는 사용자 ID만 넣어 고정값을 유도했기 때문에
+# 한 번 새어나가면 영구히 유효했다.
+# 형식: base64url(payload).base64url(signature)
+# ---------------------------------------------------------------------------
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def issue_token(kind: str, user_id: str) -> str:
+    settings = get_settings()
+    ttl = (
+        timedelta(minutes=settings.auth_access_ttl_minutes)
+        if kind == "access"
+        else timedelta(days=settings.auth_refresh_ttl_days)
+    )
+    payload = {
+        "u": user_id,
+        "k": kind,
+        "exp": int((datetime.now(timezone.utc) + ttl).timestamp()),
+    }
+    body = _b64(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = _b64(hmac.new(_TOKEN_KEY, body.encode("ascii"), hashlib.sha256).digest())
+    return f"{body}.{signature}"
+
+
+def decode_token(token: str, kind: str) -> Optional[str]:
+    """유효하면 user_id, 아니면 None. 위조·만료·종류 불일치를 모두 걸러낸다."""
+    try:
+        body, signature = token.split(".")
+        expected = _b64(hmac.new(_TOKEN_KEY, body.encode("ascii"), hashlib.sha256).digest())
+        if not hmac.compare_digest(signature, expected):
+            return None
+        payload = json.loads(_unb64(body).decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if payload.get("k") != kind:
+        return None
+    if int(payload.get("exp", 0)) < int(datetime.now(timezone.utc).timestamp()):
+        return None
+    return payload.get("u")
 
 
 # ---------------------------------------------------------------------------
@@ -78,22 +170,49 @@ def not_found(message: str) -> CompatError:
 # ---------------------------------------------------------------------------
 # 사용자
 # ---------------------------------------------------------------------------
-def ensure_demo_user(db: Session) -> AppUser:
-    """시연 계정이 없으면 만든다. 첫 기동에도 바로 로그인되도록."""
-    user = db.query(AppUser).filter_by(login_id=DEMO_LOGIN_ID).first()
-    if user is None:
-        user = AppUser(
-            user_id="u-1",
-            login_id=DEMO_LOGIN_ID,
-            name="관리자",
-            email="demo@enersave.io",
-            role="ADMIN",
-            status="ACTIVE",
-            password_hash=hash_password(DEMO_PASSWORD),
-        )
-        db.add(user)
-        db.commit()
-    return user
+def ensure_seed_users(db: Session) -> None:
+    """
+    첫 기동에 로그인할 수 있는 계정을 마련한다.
+
+    - AUTH_BOOTSTRAP_ADMIN_ID/PASSWORD 가 있으면 그 관리자를 만든다 (공개 배포용)
+    - AUTH_DEMO_ACCOUNT 가 켜져 있으면 demo/demo1234 도 만든다 (시연용)
+
+    공개 배포에서는 AUTH_DEMO_ACCOUNT=false 로 두고 부트스트랩 관리자만 쓸 것.
+    """
+    settings = get_settings()
+
+    admin_id = settings.auth_bootstrap_admin_id
+    admin_pw = settings.auth_bootstrap_admin_password
+    if admin_id and admin_pw:
+        if db.query(AppUser).filter_by(login_id=admin_id).first() is None:
+            db.add(
+                AppUser(
+                    user_id=f"u-{secrets.token_hex(4)}",
+                    login_id=admin_id,
+                    name="관리자",
+                    email="",
+                    role="ADMIN",
+                    status="ACTIVE",
+                    password_hash=hash_password(admin_pw),
+                )
+            )
+            db.commit()
+            logger.info("부트스트랩 관리자 계정을 만들었습니다: %s", admin_id)
+
+    if settings.auth_demo_account:
+        if db.query(AppUser).filter_by(login_id=DEMO_LOGIN_ID).first() is None:
+            db.add(
+                AppUser(
+                    user_id="u-1",
+                    login_id=DEMO_LOGIN_ID,
+                    name="관리자",
+                    email="demo@enersave.io",
+                    role="ADMIN",
+                    status="ACTIVE",
+                    password_hash=hash_password(DEMO_PASSWORD),
+                )
+            )
+            db.commit()
 
 
 def user_out(user: AppUser) -> Dict[str, Any]:
@@ -122,18 +241,27 @@ def user_row(user: AppUser) -> Dict[str, Any]:
 def require_user(
     authorization: Optional[str] = Header(default=None), db: Session = Depends(get_db)
 ) -> AppUser:
+    """로그인한 사용자. 조회 기능은 여기까지면 된다."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise unauthorized()
-    token = authorization.split(" ", 1)[1].strip()
 
-    user = ensure_demo_user(db)
-    for candidate in db.query(AppUser).filter(AppUser.status == "ACTIVE").all():
-        if hmac.compare_digest(token, derive_token("access", candidate.user_id)):
-            return candidate
-    raise unauthorized()
+    user_id = decode_token(authorization.split(" ", 1)[1].strip(), "access")
+    if user_id is None:
+        # 만료도 위조도 같은 코드로 돌려준다. 프론트가 이 코드를 보고 토큰을 갱신한다.
+        raise unauthorized("세션이 만료되었습니다")
+
+    user = db.get(AppUser, user_id)
+    if user is None or user.status != "ACTIVE":
+        raise unauthorized()
+    return user
 
 
 def require_admin(user: AppUser = Depends(require_user)) -> AppUser:
+    """
+    쓰기 권한. 공간·디바이스·사용자를 바꾸거나 기기를 제어하는 기능에 건다.
+
+    예전에는 로그인만 하면 누구나 공간을 지우고 제어 명령을 보낼 수 있었다.
+    """
     if user.role != "ADMIN":
         raise CompatError(403, "E4030", "관리자 권한이 필요합니다")
     return user

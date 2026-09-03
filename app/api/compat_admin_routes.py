@@ -102,7 +102,7 @@ def compat_get_space(
 
 @router.post("/spaces", summary="[호환] 공간 등록 (B-01)")
 async def compat_create_space(
-    payload: Dict[str, Any], user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+    payload: Dict[str, Any], user: AppUser = Depends(require_admin), db: Session = Depends(get_db)
 ):
     body = payload or {}
     code = (body.get("code") or "").strip()
@@ -147,7 +147,7 @@ async def compat_create_space(
 async def compat_update_space(
     space_id: str,
     payload: Dict[str, Any],
-    user: AppUser = Depends(require_user),
+    user: AppUser = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     space = get_space(db, space_id)
@@ -168,7 +168,7 @@ async def compat_update_space(
 
 @router.delete("/spaces/{space_id}", summary="[호환] 공간 삭제 (B-05)")
 def compat_delete_space(
-    space_id: str, user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+    space_id: str, user: AppUser = Depends(require_admin), db: Session = Depends(get_db)
 ):
     space = get_space(db, space_id)
     node_count = (
@@ -255,7 +255,7 @@ def compat_get_device(
 
 @router.post("/devices", summary="[호환] 노드 등록 (C-01)")
 async def compat_create_device(
-    payload: Dict[str, Any], user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+    payload: Dict[str, Any], user: AppUser = Depends(require_admin), db: Session = Depends(get_db)
 ):
     body = payload or {}
     device_id = (body.get("deviceId") or "").strip()
@@ -354,7 +354,7 @@ def compat_power_history(
 # ---------------------------------------------------------------------------
 @router.post("/control/commands", summary="[호환] 수동 제어 접수 (G-01)")
 async def compat_post_control(
-    payload: Dict[str, Any], user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+    payload: Dict[str, Any], user: AppUser = Depends(require_admin), db: Session = Depends(get_db)
 ):
     body = payload or {}
     space = get_space(db, body.get("spaceId") or "")

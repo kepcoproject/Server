@@ -1,0 +1,39 @@
+# Render 블루프린트 — 저장소를 연결하면 이 설정대로 올라간다.
+#
+# 쓰기 전에 반드시 확인할 것:
+#   1. AUTH_SECRET 을 채울 것 (비우면 재시작마다 로그인이 풀린다)
+#   2. AUTH_DEMO_ACCOUNT=false — demo/demo1234 계정이 공개되면 안 된다
+#   3. CORS_ORIGINS 를 프론트 주소로 좁힐 것
+#   4. AUTH_BOOTSTRAP_ADMIN_* 로 첫 관리자를 만들 것
+#
+# MQTT 는 이 구성에 포함되지 않는다. 클라우드에서 센서를 받으려면 외부 브로커가
+# 따로 필요하고, 그렇지 않으면 노드는 HTTP(/api/sensors/data)로만 붙는다.
+services:
+  - type: web
+    name: smart-energy-backend
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: AUTH_SECRET
+        generateValue: true          # Render 가 임의값을 만들어 준다
+      - key: AUTH_DEMO_ACCOUNT
+        value: "false"
+      - key: AUTH_BOOTSTRAP_ADMIN_ID
+        sync: false                  # 대시보드에서 직접 입력
+      - key: AUTH_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false                  # 예: https://our-team.github.io
+      - key: MQTT_ENABLED
+        value: "false"
+      - key: COMPAT_API_ENABLED
+        value: "true"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: smart-energy-db
+          property: connectionString
+
+databases:
+  - name: smart-energy-db
+    plan: free

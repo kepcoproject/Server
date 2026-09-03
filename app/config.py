@@ -64,6 +64,21 @@ class Settings(BaseSettings):
     # 국내 단상 220V 기준. 현장 전압이 다르면 여기서 바꾼다.
     sensor_line_voltage: float = 220.0
 
+    # ---- 인증 ----
+    # 토큰 서명 키. 배포 시 반드시 넣을 것. 비워두면 기동할 때마다 새로 만들어져
+    # 서버를 재시작할 때 모든 세션이 끊긴다(로컬 개발에는 문제없음).
+    auth_secret: Optional[str] = None
+    auth_access_ttl_minutes: int = 60
+    auth_refresh_ttl_days: int = 14
+
+    # 시연용 demo/demo1234 계정을 자동으로 만들지 여부.
+    # 공개 배포에서는 반드시 false 로 두고 아래 부트스트랩 관리자를 쓸 것.
+    auth_demo_account: bool = True
+
+    # 첫 관리자 계정. 값이 있으면 기동 시 없을 때만 만든다.
+    auth_bootstrap_admin_id: Optional[str] = None
+    auth_bootstrap_admin_password: Optional[str] = None
+
     # ---- 프론트엔드 호환 레이어 (시연용) ----
     # kepcoproject/Client 가 기대하는 경로·응답 봉투로 같은 데이터를 다시 내보낸다.
     # 단순화한 로그인이 포함되므로 공개 서버에 올릴 때는 끌 것.

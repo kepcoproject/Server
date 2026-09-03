@@ -40,8 +40,11 @@ from ..utils import utcnow
 from .compat_common import (
     CompatError,
     data_anchor,
-    derive_token,
-    ensure_demo_user,
+    decode_token,
+    ensure_seed_users,
+    issue_token,
+    needs_rehash,
+    verify_password,
     ensure_space,
     epoch_to_iso_z,
     get_space,
@@ -50,6 +53,7 @@ from .compat_common import (
     latest_reading_per_room,
     not_found,
     ok,
+    require_admin,
     require_user,
     to_epoch,
     unauthorized,
@@ -73,21 +77,27 @@ WEEKDAY_CODES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 # ---------------------------------------------------------------------------
 @router.post("/auth/login", summary="[호환] 로그인 (A-01)")
 async def compat_login(payload: Dict[str, Any], db: Session = Depends(get_db)):
-    ensure_demo_user(db)
+    ensure_seed_users(db)
     login_id = (payload or {}).get("loginId") or ""
     password = (payload or {}).get("password") or ""
 
     user = db.query(AppUser).filter_by(login_id=login_id).first()
-    if user is None or user.password_hash != hash_password(password):
+    if user is None or not verify_password(password, user.password_hash):
         raise unauthorized("아이디 또는 비밀번호가 올바르지 않습니다")
     if user.status != "ACTIVE":
         raise CompatError(403, "E4030", "승인 대기 중인 계정입니다. 관리자에게 문의하세요")
 
+    # 옛 형식(소금 없는 SHA-256)으로 저장된 계정은 로그인 성공 시 조용히 갈아끼운다.
+    if needs_rehash(user.password_hash):
+        user.password_hash = hash_password(password)
+        db.commit()
+        logger.info("[호환] 비밀번호 해시를 새 형식으로 갱신: %s", login_id)
+
     logger.info("[호환] 로그인: %s", login_id)
     return ok(
         {
-            "accessToken": derive_token("access", user.user_id),
-            "refreshToken": derive_token("refresh", user.user_id),
+            "accessToken": issue_token("access", user.user_id),
+            "refreshToken": issue_token("refresh", user.user_id),
             "user": user_out(user),
         }
     )
@@ -95,17 +105,21 @@ async def compat_login(payload: Dict[str, Any], db: Session = Depends(get_db)):
 
 @router.post("/auth/refresh", summary="[호환] 토큰 갱신 (A-02)")
 async def compat_refresh(payload: Dict[str, Any], db: Session = Depends(get_db)):
-    ensure_demo_user(db)
-    supplied = (payload or {}).get("refreshToken") or ""
-    for user in db.query(AppUser).filter(AppUser.status == "ACTIVE").all():
-        if supplied == derive_token("refresh", user.user_id):
-            return ok(
-                {
-                    "accessToken": derive_token("access", user.user_id),
-                    "refreshToken": derive_token("refresh", user.user_id),
-                }
-            )
-    raise unauthorized("리프레시 토큰이 유효하지 않습니다")
+    ensure_seed_users(db)
+    user_id = decode_token((payload or {}).get("refreshToken") or "", "refresh")
+    if user_id is None:
+        raise unauthorized("리프레시 토큰이 유효하지 않습니다")
+
+    user = db.get(AppUser, user_id)
+    if user is None or user.status != "ACTIVE":
+        raise unauthorized("리프레시 토큰이 유효하지 않습니다")
+
+    return ok(
+        {
+            "accessToken": issue_token("access", user.user_id),
+            "refreshToken": issue_token("refresh", user.user_id),
+        }
+    )
 
 
 @router.get("/auth/me", summary="[호환] 내 정보 (A-04)")
@@ -140,7 +154,7 @@ async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
 
 @router.get("/auth/check-id", summary="[호환] 아이디 중복 확인 (A-06)")
 def compat_check_id(loginId: str = Query(...), db: Session = Depends(get_db)):
-    ensure_demo_user(db)
+    ensure_seed_users(db)
     taken = db.query(AppUser).filter_by(login_id=loginId).first() is not None
     return ok({"available": not taken})
 
@@ -150,7 +164,7 @@ async def compat_change_password(
     payload: Dict[str, Any], user: AppUser = Depends(require_user), db: Session = Depends(get_db)
 ):
     body = payload or {}
-    if user.password_hash != hash_password(body.get("currentPassword") or ""):
+    if not verify_password(body.get("currentPassword") or "", user.password_hash):
         raise CompatError(400, "E4001", "현재 비밀번호가 올바르지 않습니다")
     new_password = body.get("newPassword") or ""
     if len(new_password) < 8:
@@ -389,7 +403,7 @@ def _set_recommendation_state(
 
 @router.post("/recommendations/{rec_id}/apply", summary="[호환] 추천 적용 (F-02)")
 def compat_apply_recommendation(
-    rec_id: str, user: AppUser = Depends(require_user), db: Session = Depends(get_db)
+    rec_id: str, user: AppUser = Depends(require_admin), db: Session = Depends(get_db)
 ):
     state = _set_recommendation_state(db, rec_id, "APPLIED")
     logger.info("[호환] 추천 적용: %s", rec_id)
@@ -402,7 +416,7 @@ def compat_apply_recommendation(
 async def compat_reject_recommendation(
     rec_id: str,
     payload: Optional[Dict[str, Any]] = None,
-    user: AppUser = Depends(require_user),
+    user: AppUser = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     comment = (payload or {}).get("comment")
