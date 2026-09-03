@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     # kepcoproject/Client 가 기대하는 경로·응답 봉투로 같은 데이터를 다시 내보낸다.
     # 단순화한 로그인이 포함되므로 공개 서버에 올릴 때는 끌 것.
     compat_api_enabled: bool = True
+    # 호환 API를 붙일 접두사. 화면과 같은 주소에서 서빙할 때는 경로가 겹치므로
+    # ("/spaces" 가 화면이면서 API가 된다) 접두사를 줘서 떼어놓는다.
+    # 로컬 개발처럼 화면을 따로 띄울 때는 빈 값으로 두면 된다.
+    compat_api_prefix: str = ""
+
+    # 빌드된 프론트엔드를 같이 서빙할지. 이 경로에 index.html 이 있으면 켜진다.
+    frontend_dir: str = "web"
 
     app_name: str = "Smart Energy Saving System - Backend"
     log_level: str = "INFO"

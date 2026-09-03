@@ -77,3 +77,27 @@ def test_schema_compiles_for_postgresql():
         CreateTable(table).compile(dialect=pg)
         for index in table.indexes:
             CreateIndex(index).compile(dialect=pg)
+
+
+def test_compat_prefix_moves_routes_off_screen_paths():
+    """
+    화면과 같은 주소에서 서빙할 때 /spaces, /devices, /users 는 화면 경로다.
+    API 를 접두사 아래로 내리지 않으면 화면 대신 JSON 이 나온다.
+    """
+    from fastapi import FastAPI
+
+    from app.api.compat_admin_routes import router as admin_router
+    from app.api.compat_routes import router as compat_router
+
+    app = FastAPI()
+    app.include_router(compat_router, prefix="/client-api")
+    app.include_router(admin_router, prefix="/client-api")
+    # 이 FastAPI 버전은 include_router 를 지연 처리해 app.routes 로는 안 보인다.
+    paths = set(app.openapi()["paths"])
+
+    assert "/client-api/auth/login" in paths
+    assert "/client-api/spaces" in paths
+    # 접두사 없는 경로는 화면 몫으로 비어 있어야 한다
+    assert "/spaces" not in paths
+    assert "/devices" not in paths
+    assert "/users" not in paths

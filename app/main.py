@@ -1,8 +1,11 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api.compat_admin_routes import router as compat_admin_router
 from .api.compat_common import CompatError, compat_error_handler
@@ -72,12 +75,15 @@ app.include_router(webhook_router, prefix="/api")
 # ESP32 노드가 HTTP로 직접 붙는 경로 (/api/sensors/data, /api/spaces/{id}/actuator/latest)
 app.include_router(device_router, prefix="/api")
 
-# 프론트엔드는 /auth, /monitoring 처럼 접두사 없이 부르므로 루트에 붙인다.
+# 프론트엔드는 /auth, /monitoring 처럼 접두사 없이 부른다.
+# 다만 화면을 같은 주소에서 서빙하면 /spaces, /devices, /users 가 화면 경로와
+# 겹치므로, 그때는 COMPAT_API_PREFIX 로 API 쪽을 떼어놓는다.
 if settings.compat_api_enabled:
     # 실패 응답도 {success, data, error} 봉투로 나가야 프론트가 error.code 로 분기한다.
     app.add_exception_handler(CompatError, compat_error_handler)
-    app.include_router(compat_router)
-    app.include_router(compat_admin_router)
+    _prefix = settings.compat_api_prefix.rstrip("/")
+    app.include_router(compat_router, prefix=_prefix)
+    app.include_router(compat_admin_router, prefix=_prefix)
     _startup_logger = logging.getLogger("smart_energy.main")
     _startup_logger.warning("=" * 72)
     _startup_logger.warning("  프론트엔드 호환 레이어가 켜져 있습니다 (시연용 구성)")
@@ -100,3 +106,35 @@ def health():
         "mqtt_enabled": settings.mqtt_enabled,
         "mqtt_connected": mqtt_service.is_connected(),
     }
+
+
+# ---------------------------------------------------------------------------
+# 빌드된 프론트엔드 서빙
+#
+# API 라우터를 모두 등록한 뒤에 붙여야 한다. FastAPI 는 등록 순서로 매칭하므로,
+# 아래 catch-all 이 먼저 오면 API 요청까지 가로챈다.
+# ---------------------------------------------------------------------------
+_frontend_dir = Path(settings.frontend_dir)
+if (_frontend_dir / "index.html").is_file():
+    _assets = _frontend_dir / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        """
+        실제 파일이 있으면 그 파일을, 없으면 index.html 을 준다.
+
+        /spaces 같은 주소는 서버에 파일이 없지만 프론트의 화면 경로다.
+        index.html 을 돌려줘야 브라우저에서 라우팅이 이어진다.
+        """
+        candidate = _frontend_dir / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_frontend_dir / "index.html")
+
+    logging.getLogger("smart_energy.main").info(
+        "프론트엔드를 함께 서빙합니다 (%s). API 접두사: %s",
+        _frontend_dir,
+        settings.compat_api_prefix or "(없음)",
+    )

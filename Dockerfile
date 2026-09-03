@@ -1,6 +1,41 @@
 # 스마트 에너지 절약 시스템 백엔드
 #
-# 로컬 시연에는 필요 없다. Render·Railway·Fly 같은 곳에 올릴 때 쓴다.
+# 프론트엔드(kepcoproject/Client)를 함께 빌드해 한 주소에서 서빙한다.
+# 학교 서버처럼 포트를 하나만 쓸 수 있는 환경을 염두에 둔 구성이다.
+#
+# 화면 경로(/spaces, /devices, /users)가 API 경로와 겹치므로 API 는
+# COMPAT_API_PREFIX 아래로 내리고, 프론트도 같은 값을 보도록 빌드한다.
+# 두 값이 어긋나면 로그인부터 404 가 나므로 여기서 한 번에 맞춘다.
+
+# ---------------------------------------------------------------------------
+# 1단계 — 프론트엔드 빌드
+# ---------------------------------------------------------------------------
+FROM node:20-slim AS frontend
+
+ARG CLIENT_REPO=https://github.com/kepcoproject/Client
+ARG CLIENT_REF=main
+# 백엔드의 COMPAT_API_PREFIX 와 반드시 같아야 한다.
+ARG API_PREFIX=/client-api
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN git clone --depth 1 --branch ${CLIENT_REF} ${CLIENT_REPO} .
+
+RUN npm ci --no-audit --no-fund
+
+# 같은 서버에서 서빙하므로 절대 주소가 아니라 접두사만 준다.
+# 목업은 끈다 — 진짜 백엔드를 보게 해야 한다.
+ENV VITE_API_BASE_URL=${API_PREFIX}
+ENV VITE_USE_MOCKS=false
+# --base=/ 로 덮어쓴다. 프론트 저장소는 GitHub Pages(/Client/)를 기본으로 두고 있는데,
+# 여기서는 서버 루트에서 서빙하므로 그대로 두면 자산 경로가 어긋나 흰 화면만 나온다.
+RUN npx vite build --base=/
+
+# ---------------------------------------------------------------------------
+# 2단계 — 백엔드
+# ---------------------------------------------------------------------------
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -11,6 +46,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY scripts ./scripts
+
+# 1단계에서 만든 화면. app/main.py 가 FRONTEND_DIR 에서 찾는다.
+COPY --from=frontend /build/dist ./web
 
 # 호스팅 업체는 대개 PORT 환경변수로 포트를 지정한다. 없으면 8000.
 ENV PORT=8000

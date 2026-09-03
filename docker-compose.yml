@@ -1,0 +1,52 @@
+# 학교 서버 등 포트를 하나만 쓸 수 있는 환경용 구성.
+# 화면과 API를 같은 주소에서 서빙한다.
+#
+#   http://서버:8080/            -> 대시보드 화면
+#   http://서버:8080/client-api  -> 화면이 쓰는 API
+#   http://서버:8080/api         -> 센서 노드(ESP32)가 쓰는 API
+#
+# 실행:  docker compose up -d --build
+# 확인:  curl http://localhost:8080/health
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 프론트를 이 접두사로 빌드한다. 아래 COMPAT_API_PREFIX 와 반드시 같아야 한다.
+        API_PREFIX: /client-api
+    container_name: smart-energy-backend
+    restart: unless-stopped
+    ports:
+      # 왼쪽이 서버에서 열어둔 포트, 오른쪽은 컨테이너 안 포트(고정)
+      - "8080:8000"
+    environment:
+      # SQLite 파일을 볼륨에 둔다. 슬래시 4개 = 절대경로
+      DATABASE_URL: sqlite:////data/smart_energy.db
+
+      # 프론트를 함께 서빙하므로 화면 경로와 겹치지 않게 API를 접두사 아래로 내린다
+      COMPAT_API_PREFIX: /client-api
+      COMPAT_API_ENABLED: "true"
+      FRONTEND_DIR: web
+
+      # 토큰 서명 키. 비워두면 재시작할 때마다 로그인이 전부 풀린다.
+      # 반드시 길고 예측 불가능한 값으로 바꿀 것.
+      AUTH_SECRET: 여기를_긴_랜덤_문자열로_바꾸세요
+
+      # 공개 서버이므로 demo 계정은 끄고 관리자 계정을 직접 만든다
+      AUTH_DEMO_ACCOUNT: "false"
+      AUTH_BOOTSTRAP_ADMIN_ID: admin
+      AUTH_BOOTSTRAP_ADMIN_PASSWORD: 8자이상_비밀번호로_바꾸세요
+
+      # 화면을 같은 주소에서 주므로 교차 출처 요청이 없다. 필요해지면 도메인을 적을 것.
+      CORS_ORIGINS: "*"
+
+      # 컨테이너 안에 브로커가 없다. ESP32는 HTTP(/api/sensors/data)로 붙인다.
+      # MQTT를 쓰려면 mosquitto 서비스를 추가하고 MQTT_HOST를 그 이름으로 지정할 것.
+      MQTT_ENABLED: "false"
+    volumes:
+      - sqlite-data:/data
+
+volumes:
+  sqlite-data:
