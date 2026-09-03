@@ -144,7 +144,12 @@ def _member_headers(client):
     """승인된 일반 사용자를 만들어 토큰을 받는다."""
     client.post(
         "/auth/signup",
-        json={"loginId": "memberx", "password": "memberpw123", "name": "일반"},
+        json={
+            "loginId": "memberx",
+            "password": "memberpw123",
+            "name": "일반",
+            "email": "member@example.com",
+        },
     )
     db = SessionLocal()
     try:

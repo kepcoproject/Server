@@ -86,7 +86,12 @@ def test_signup_creates_pending_user_and_cannot_login():
     with TestClient(app) as client:
         resp = client.post(
             "/auth/signup",
-            json={"loginId": "newbie", "password": "pw12345678", "name": "신규", "email": "n@x.io"},
+            json={
+                "loginId": "newbie",
+                "password": "pw12345678",
+                "name": "신규",
+                "email": "n@x.io",
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["data"]["status"] == "PENDING"
@@ -96,7 +101,15 @@ def test_signup_creates_pending_user_and_cannot_login():
         assert blocked.status_code == 403
         assert blocked.json()["error"]["code"] == "E4030"
 
-        dup = client.post("/auth/signup", json={"loginId": "newbie", "password": "pw12345678"})
+        dup = client.post(
+            "/auth/signup",
+            json={
+                "loginId": "newbie",
+                "password": "pw12345678",
+                "name": "신규",
+                "email": "n@x.io",
+            },
+        )
         assert dup.status_code == 409
 
 
@@ -325,10 +338,18 @@ def test_report_has_summary_and_buckets():
 def test_user_list_and_approval():
     with TestClient(app) as client:
         headers = _login(client)
-        client.post("/auth/signup", json={"loginId": "pending-user", "password": "pw12345678"})
+        client.post(
+            "/auth/signup",
+            json={
+                "loginId": "pendinguser",
+                "password": "pw12345678",
+                "name": "대기",
+                "email": "pending@example.com",
+            },
+        )
 
         items = client.get("/users", headers=headers).json()["data"]["items"]
-        target = next(u for u in items if u["loginId"] == "pending-user")
+        target = next(u for u in items if u["loginId"] == "pendinguser")
         assert target["status"] == "PENDING"
 
         updated = client.patch(
@@ -338,7 +359,7 @@ def test_user_list_and_approval():
 
         # 승인 후에는 로그인이 된다
         assert client.post(
-            "/auth/login", json={"loginId": "pending-user", "password": "pw12345678"}
+            "/auth/login", json={"loginId": "pendinguser", "password": "pw12345678"}
         ).status_code == 200
 
 
@@ -349,3 +370,62 @@ def test_admin_cannot_demote_self():
         resp = client.patch(f"/users/{me['id']}", headers=headers, json={"role": "MEMBER"})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "E4003"
+
+
+def test_signup_requires_every_field():
+    """
+    화면에서도 막지만 서버가 다시 봐야 한다. API 를 직접 부르면 화면 검증을 건너뛴다.
+    프론트(Signup.jsx)가 보내는 다섯 필드를 모두 필수로 본다.
+    """
+    ok_body = {
+        "loginId": "validuser",
+        "password": "password123",
+        "passwordConfirm": "password123",
+        "name": "홍길동",
+        "email": "hong@example.com",
+    }
+
+    cases = [
+        ({"loginId": ""}, "아이디 없음"),
+        ({"loginId": "ab"}, "아이디가 너무 짧음"),
+        ({"loginId": "한글아이디"}, "아이디에 허용되지 않는 문자"),
+        ({"name": ""}, "이름 없음"),
+        ({"email": ""}, "이메일 없음"),
+        ({"email": "not-an-email"}, "이메일 형식 오류"),
+        ({"password": ""}, "비밀번호 없음"),
+        ({"password": "short1", "passwordConfirm": "short1"}, "비밀번호가 너무 짧음"),
+        ({"passwordConfirm": "different123"}, "비밀번호 확인 불일치"),
+    ]
+
+    with TestClient(app) as client:
+        for override, label in cases:
+            body = {**ok_body, **override}
+            resp = client.post("/auth/signup", json=body)
+            assert resp.status_code == 400, f"{label}: 통과되면 안 된다"
+            assert resp.json()["error"]["code"] == "E4000", label
+
+        # 다 채우면 통과한다
+        resp = client.post("/auth/signup", json=ok_body)
+        assert resp.status_code == 200
+        assert resp.json()["data"]["status"] == "PENDING"
+
+
+def test_signup_stores_name_and_email_as_given():
+    """예전에는 이름이 비면 아이디로 대신 채웠다. 이제는 받은 값을 그대로 쓴다."""
+    with TestClient(app) as client:
+        client.post(
+            "/auth/signup",
+            json={
+                "loginId": "storeduser",
+                "password": "password123",
+                "passwordConfirm": "password123",
+                "name": "김철수",
+                "email": "chulsoo@example.com",
+            },
+        )
+        headers = _login(client)
+        items = client.get("/users", headers=headers).json()["data"]["items"]
+
+    target = next(u for u in items if u["loginId"] == "storeduser")
+    assert target["name"] == "김철수"
+    assert target["email"] == "chulsoo@example.com"

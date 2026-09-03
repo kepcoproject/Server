@@ -16,6 +16,7 @@ Bearer 토큰을 싣는다. 이 모듈은 기존 /api/* 를 그대로 둔 채 �
 공간·디바이스·사용자·제어·리포트는 compat_admin_routes.py 에 있다.
 """
 import logging
+import re
 import uuid
 from datetime import timedelta
 from typing import Any, Dict, Optional
@@ -70,6 +71,12 @@ settings = get_settings()
 WASTE_POWER_W = 50.0
 
 WEEKDAY_CODES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+
+# 회원가입 입력 규칙. 화면(Signup.jsx)의 검증과 같은 기준으로 맞춘다.
+MIN_LOGIN_ID_LENGTH = 4
+MIN_PASSWORD_LENGTH = 8
+LOGIN_ID_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
 
 # ---------------------------------------------------------------------------
@@ -131,20 +138,47 @@ def compat_me(user: AppUser = Depends(require_user)):
 async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
     body = payload or {}
     login_id = (body.get("loginId") or "").strip()
+    password = body.get("password") or ""
+    password_confirm = body.get("passwordConfirm")
+    name = (body.get("name") or "").strip()
+    email = (body.get("email") or "").strip()
+
+    # 화면에서도 막지만 서버에서 다시 본다. API 를 직접 호출하면 화면 검증을 건너뛸 수 있다.
     if not login_id:
         raise CompatError(400, "E4000", "아이디를 입력하세요")
+    if len(login_id) < MIN_LOGIN_ID_LENGTH:
+        raise CompatError(400, "E4000", f"아이디는 {MIN_LOGIN_ID_LENGTH}자 이상이어야 합니다")
+    if not LOGIN_ID_PATTERN.fullmatch(login_id):
+        raise CompatError(400, "E4000", "아이디는 영문·숫자·밑줄만 쓸 수 있습니다")
+
+    if not name:
+        raise CompatError(400, "E4000", "이름을 입력하세요")
+
+    if not email:
+        raise CompatError(400, "E4000", "이메일을 입력하세요")
+    if not EMAIL_PATTERN.fullmatch(email):
+        raise CompatError(400, "E4000", "이메일 형식이 올바르지 않습니다")
+
+    if not password:
+        raise CompatError(400, "E4000", "비밀번호를 입력하세요")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise CompatError(400, "E4000", f"비밀번호는 {MIN_PASSWORD_LENGTH}자 이상이어야 합니다")
+    # 확인란은 화면에만 있는 값이라 안 보낼 수도 있다. 보냈다면 일치해야 한다.
+    if password_confirm is not None and password != password_confirm:
+        raise CompatError(400, "E4000", "비밀번호가 서로 다릅니다")
+
     if db.query(AppUser).filter_by(login_id=login_id).first():
         raise CompatError(409, "E4090", "이미 사용 중인 아이디입니다")
 
     user = AppUser(
         user_id=f"u-{uuid.uuid4().hex[:8]}",
         login_id=login_id,
-        name=(body.get("name") or login_id),
-        email=(body.get("email") or ""),
+        name=name,
+        email=email,
         role="MEMBER",
         # 가입은 즉시 사용이 아니라 관리자 승인 대기 상태로 들어간다.
         status="PENDING",
-        password_hash=hash_password(body.get("password") or ""),
+        password_hash=hash_password(password),
     )
     db.add(user)
     db.commit()
