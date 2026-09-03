@@ -7,8 +7,10 @@ pydantic-settings>=2.3
 python-dotenv>=1.0
 httpx>=0.27          # 아웃바운드 웹훅 전송용
 
-# PostgreSQL을 사용할 경우 아래 드라이버 주석 해제
-# psycopg2-binary>=2.9
+# PostgreSQL 드라이버.
+# 로컬은 SQLite라 안 써도 되지만, 클라우드(Render 등)는 PostgreSQL을 주므로
+# 설치되어 있지 않으면 기동하다 죽는다. 미리 넣어 둔다.
+psycopg2-binary>=2.9
 
 # 테스트용
 pytest>=8.0

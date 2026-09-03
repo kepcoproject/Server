@@ -9,9 +9,25 @@ logger = logging.getLogger("smart_energy.database")
 
 settings = get_settings()
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+def _normalize_database_url(url: str) -> str:
+    """
+    호스팅 업체(Render, Heroku 등)는 DATABASE_URL 을 postgres:// 로 준다.
+    SQLAlchemy 2.0 은 이 접두사를 더 이상 받지 않아 기동하다 죽으므로 바꿔 준다.
+    """
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg2://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
 
-engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
+
+database_url = _normalize_database_url(settings.database_url)
+if database_url != settings.database_url:
+    logger.info("DATABASE_URL 접두사를 SQLAlchemy 형식으로 변환했습니다")
+
+connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+
+engine = create_engine(database_url, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
