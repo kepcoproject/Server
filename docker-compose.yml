@@ -13,6 +13,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 빌드할 때 호스트 네트워크를 그대로 쓴다.
+      # 학교망처럼 Docker 기본 브리지에서 바깥으로 못 나가는 환경이 있는데,
+      # 그러면 프론트를 받아오는 git clone 이 "Connection reset by peer" 로 죽는다.
+      # 호스트에서 git pull 이 되는 곳이면 이 설정으로 통과한다.
+      network: host
       args:
         # 프론트를 이 접두사로 빌드한다. 아래 COMPAT_API_PREFIX 와 반드시 같아야 한다.
         API_PREFIX: /client-api
