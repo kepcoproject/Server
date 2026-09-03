@@ -10,15 +10,15 @@
 # ---------------------------------------------------------------------------
 # 1단계 — 프론트엔드 빌드
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS frontend
+# slim 이 아니라 기본 이미지를 쓴다. git 이 이미 들어 있어 apt-get 이 필요 없다.
+# 학교망처럼 데비안 패키지 서버가 막힌 환경에서는 apt-get 이 exit 100 으로 실패한다.
+# 빌드 단계라 이미지가 커져도 최종 이미지 크기에는 영향이 없다.
+FROM node:20 AS frontend
 
 ARG CLIENT_REPO=https://github.com/kepcoproject/Client
 ARG CLIENT_REF=main
 # 백엔드의 COMPAT_API_PREFIX 와 반드시 같아야 한다.
 ARG API_PREFIX=/client-api
-
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 RUN git clone --depth 1 --branch ${CLIENT_REF} ${CLIENT_REPO} .
