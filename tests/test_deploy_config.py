@@ -57,3 +57,23 @@ def test_dockerfile_uses_single_worker():
     """
     text = io.open("Dockerfile", encoding="utf-8").read()
     assert "--workers 1" in text
+
+
+def test_schema_compiles_for_postgresql():
+    """
+    로컬은 SQLite, 배포는 PostgreSQL 이다. 방언 차이로 테이블이 안 만들어지면
+    배포 후 첫 기동에서야 드러나므로 미리 DDL 을 생성해 본다.
+    접속은 하지 않고 문법만 확인한다.
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateIndex, CreateTable
+
+    from app import models  # noqa: F401  모든 테이블을 메타데이터에 등록
+    from app.database import Base
+
+    pg = postgresql.dialect()
+    assert Base.metadata.sorted_tables, "등록된 테이블이 없다"
+    for table in Base.metadata.sorted_tables:
+        CreateTable(table).compile(dialect=pg)
+        for index in table.indexes:
+            CreateIndex(index).compile(dialect=pg)
