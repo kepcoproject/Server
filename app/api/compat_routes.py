@@ -22,7 +22,7 @@ from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from .. import analytics
@@ -169,6 +169,15 @@ async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
 
     if db.query(AppUser).filter_by(login_id=login_id).first():
         raise CompatError(409, "E4090", "이미 사용 중인 아이디입니다")
+
+    # 이메일 1개당 계정 1개. 대소문자만 다른 주소는 같은 주소로 본다
+    # (Gmail 을 비롯한 대부분의 메일 서비스가 그렇게 다룬다).
+    # 저장은 입력한 그대로 두고 비교만 소문자로 맞춘다.
+    #
+    # DB 유니크 제약을 걸지 않은 이유: 부트스트랩·데모 관리자 계정은 email 이
+    # 빈 문자열이라 유니크 인덱스를 만들면 서로 충돌한다. 여기서 막는다.
+    if db.query(AppUser).filter(func.lower(AppUser.email) == email.lower()).first():
+        raise CompatError(409, "E4090", "이미 가입된 이메일입니다")
 
     user = AppUser(
         user_id=f"u-{uuid.uuid4().hex[:8]}",

@@ -507,3 +507,46 @@ def test_bad_number_fields_return_400_not_500():
         )
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "E4000"
+
+
+def test_email_can_only_be_used_once():
+    """이메일 1개당 계정 1개. 대소문자만 다른 주소도 같은 주소로 본다."""
+    base = {
+        "password": "password123",
+        "passwordConfirm": "password123",
+        "name": "홍길동",
+    }
+    with TestClient(app) as client:
+        first = client.post(
+            "/auth/signup", json={**base, "loginId": "mailowner", "email": "one@example.com"}
+        )
+        assert first.status_code == 200
+
+        # 같은 주소
+        dup = client.post(
+            "/auth/signup", json={**base, "loginId": "mailthief", "email": "one@example.com"}
+        )
+        assert dup.status_code == 409
+        assert dup.json()["error"]["code"] == "E4090"
+        assert "이메일" in dup.json()["error"]["message"]
+
+        # 대소문자만 다른 주소도 같은 것으로 본다
+        cased = client.post(
+            "/auth/signup", json={**base, "loginId": "mailcase", "email": "One@Example.COM"}
+        )
+        assert cased.status_code == 409
+
+        # 다른 주소는 통과한다
+        other = client.post(
+            "/auth/signup", json={**base, "loginId": "mailother", "email": "two@example.com"}
+        )
+        assert other.status_code == 200
+
+        headers = _login(client)
+        items = client.get("/users", headers=headers).json()["data"]["items"]
+
+    logins = [u["loginId"] for u in items]
+    assert "mailowner" in logins and "mailother" in logins
+    assert "mailthief" not in logins and "mailcase" not in logins
+    # 저장은 입력한 그대로 둔다 (소문자로 바꾸지 않는다)
+    assert next(u for u in items if u["loginId"] == "mailowner")["email"] == "one@example.com"
