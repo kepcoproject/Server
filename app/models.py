@@ -148,6 +148,28 @@ class AppUser(Base):
     status = Column(String, nullable=False, default="PENDING")  # ACTIVE | PENDING
     password_hash = Column(String, nullable=False, default="")
     requested_at = Column(DateTime, default=utcnow, nullable=False)
+    # 메일로 보낸 링크를 눌러 본인 주소임이 확인됐는지.
+    # 비밀번호 재설정은 확인된 주소로만 보낸다 — 아무 주소나 적고 그 주소로
+    # 재설정 링크를 받을 수 있으면 확인하는 의미가 없다.
+    email_verified = Column(Boolean, nullable=False, default=False)
+
+
+class AuthToken(Base):
+    """
+    이메일 인증 · 비밀번호 재설정에 쓰는 일회용 토큰.
+
+    원문은 저장하지 않고 해시만 둔다. DB 를 들여다볼 수 있는 사람이
+    남의 비밀번호를 재설정하는 링크를 만들어낼 수 없어야 한다.
+    """
+
+    __tablename__ = "auth_tokens"
+
+    token_hash = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("app_users.user_id"), nullable=False, index=True)
+    purpose = Column(String, nullable=False, index=True)  # VERIFY_EMAIL | RESET_PASSWORD
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
 
 
 class ControlCommand(Base):

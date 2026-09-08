@@ -79,6 +79,28 @@ class Settings(BaseSettings):
     auth_bootstrap_admin_id: Optional[str] = None
     auth_bootstrap_admin_password: Optional[str] = None
 
+    # ---- 메일 (이메일 인증 · 비밀번호 재설정) ----
+    # 비워두면 메일을 보내지 않고 링크를 서버 로그에 남긴다.
+    # SMTP 계정이 준비되기 전에도 흐름을 확인할 수 있게 하기 위한 것이고,
+    # 공개 배포에서는 반드시 채울 것.
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_username: Optional[str] = None
+    smtp_password: Optional[str] = None
+    # 587 은 STARTTLS, 465 는 처음부터 SSL. 포트에 맞춰 자동으로 고른다.
+    smtp_use_tls: bool = True
+    smtp_from: str = "no-reply@smart-energy.local"
+    smtp_from_name: str = "스마트 에너지 절약 시스템"
+    smtp_timeout: float = 10.0
+
+    # 메일 본문에 넣을 링크의 앞부분. 사용자가 브라우저로 여는 주소다.
+    # 비워두면 요청이 들어온 주소에서 유추한다(리버스 프록시 뒤에서는 틀릴 수 있다).
+    public_base_url: Optional[str] = None
+
+    # 인증·재설정 링크의 유효 시간
+    email_verify_ttl_hours: int = 24
+    password_reset_ttl_minutes: int = 30
+
     # ---- 프론트엔드 호환 레이어 (시연용) ----
     # kepcoproject/Client 가 기대하는 경로·응답 봉투로 같은 데이터를 다시 내보낸다.
     # 단순화한 로그인이 포함되므로 공개 서버에 올릴 때는 끌 것.

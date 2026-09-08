@@ -49,6 +49,23 @@ services:
       # 화면을 같은 주소에서 주므로 교차 출처 요청이 없다. 필요해지면 도메인을 적을 것.
       CORS_ORIGINS: "*"
 
+      # ---- 메일 (비밀번호 찾기 · 이메일 인증) ----
+      # 여기를 비워두면 메일을 보내지 않고 링크를 컨테이너 로그에만 남긴다.
+      # 확인:  docker compose logs backend | grep -A6 "SMTP 미설정"
+      # 그 상태로도 흐름은 전부 동작하지만, 사용자는 링크를 받을 수 없다.
+      #
+      # Gmail 을 쓴다면 2단계 인증을 켠 뒤 "앱 비밀번호" 를 만들어 넣을 것.
+      # 계정 비밀번호로는 로그인되지 않는다.
+      # SMTP_HOST: smtp.gmail.com
+      # SMTP_PORT: "587"
+      # SMTP_USERNAME: 보내는주소@gmail.com
+      # SMTP_PASSWORD: 앱_비밀번호_16자리
+      # SMTP_FROM: 보내는주소@gmail.com
+
+      # 메일 본문에 넣을 링크의 앞부분. 사용자가 브라우저로 여는 주소여야 한다.
+      # 비워두면 요청 주소에서 유추하는데, 프록시 뒤에서는 틀린 주소가 나간다.
+      PUBLIC_BASE_URL: http://service.gsmsv.site:33141
+
       # 컨테이너 안에 브로커가 없다. ESP32는 HTTP(/api/sensors/data)로 붙인다.
       # MQTT를 쓰려면 mosquitto 서비스를 추가하고 MQTT_HOST를 그 이름으로 지정할 것.
       MQTT_ENABLED: "false"

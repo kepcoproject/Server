@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..database import get_db
-from ..models import AppUser, SensorReading, Space
+from ..models import AppUser, AuthToken, SensorReading, Space
 from ..utils import utcnow
 
 logger = logging.getLogger("smart_energy.compat")
@@ -132,6 +132,75 @@ def decode_token(token: str, kind: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 일회용 토큰 (이메일 인증 · 비밀번호 재설정)
+#
+# 메일로 보내는 링크에는 원문을 싣고 DB 에는 해시만 남긴다. DB 를 볼 수 있는
+# 사람이 남의 비밀번호를 재설정하는 링크를 만들어낼 수 없어야 한다.
+# ---------------------------------------------------------------------------
+VERIFY_EMAIL = "VERIFY_EMAIL"
+RESET_PASSWORD = "RESET_PASSWORD"
+
+
+def _token_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def issue_auth_token(db: Session, user: AppUser, purpose: str, ttl: timedelta) -> str:
+    """
+    새 토큰을 만들고 원문을 돌려준다. 원문은 이 순간에만 존재한다.
+
+    같은 용도의 지난 토큰은 지운다. 재설정 링크를 두 번 요청하면 앞의 것은
+    더 이상 듣지 않아야 한다.
+    """
+    db.query(AuthToken).filter(
+        AuthToken.user_id == user.user_id, AuthToken.purpose == purpose
+    ).delete()
+
+    raw = secrets.token_urlsafe(32)
+    db.add(
+        AuthToken(
+            token_hash=_token_hash(raw),
+            user_id=user.user_id,
+            purpose=purpose,
+            expires_at=utcnow() + ttl,
+        )
+    )
+    db.commit()
+    return raw
+
+
+def consume_auth_token(db: Session, raw: str, purpose: str) -> Optional[AppUser]:
+    """
+    토큰을 쓰고 폐기한다. 쓸 수 없는 토큰이면 None.
+
+    만료·재사용·용도 불일치를 모두 같은 결과로 돌려준다. 어느 쪽이 틀렸는지
+    알려주면 유효한 토큰을 찾는 데 쓰일 수 있다.
+    """
+    if not raw:
+        return None
+    token = db.get(AuthToken, _token_hash(raw))
+    if token is None or token.purpose != purpose:
+        return None
+    if token.used_at is not None or token.expires_at < utcnow():
+        return None
+
+    user = db.get(AppUser, token.user_id)
+    if user is None:
+        return None
+
+    # 한 번 쓰면 사라진다. 링크가 메일함에 남아 있어도 다시 통하지 않는다.
+    db.delete(token)
+    db.commit()
+    return user
+
+
+def purge_expired_tokens(db: Session) -> None:
+    """만료된 토큰을 치운다. 남겨둘 이유가 없다."""
+    db.query(AuthToken).filter(AuthToken.expires_at < utcnow()).delete()
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # 응답 봉투
 # ---------------------------------------------------------------------------
 def ok(data: Any) -> Dict[str, Any]:
@@ -194,6 +263,8 @@ def ensure_seed_users(db: Session) -> None:
                     role="ADMIN",
                     status="ACTIVE",
                     password_hash=hash_password(admin_pw),
+                    # 이메일이 없는 계정이라 인증할 대상이 없다.
+                    email_verified=True,
                 )
             )
             db.commit()
@@ -210,6 +281,7 @@ def ensure_seed_users(db: Session) -> None:
                     role="ADMIN",
                     status="ACTIVE",
                     password_hash=hash_password(DEMO_PASSWORD),
+                    email_verified=True,
                 )
             )
             db.commit()
@@ -235,6 +307,9 @@ def user_row(user: AppUser) -> Dict[str, Any]:
         "role": user.role,
         "status": user.status,
         "requestedAt": iso_z(user.requested_at),
+        # 관리자가 승인 전에 확인할 수 있게 노출한다. 인증되지 않은 주소는
+        # 비밀번호 재설정을 받을 수 없다.
+        "emailVerified": bool(user.email_verified),
     }
 
 

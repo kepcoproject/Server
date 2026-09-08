@@ -21,11 +21,11 @@ import uuid
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
-from .. import analytics
+from .. import analytics, mailer
 from ..config import get_settings
 from ..database import get_db
 from ..models import (
@@ -39,7 +39,10 @@ from ..models import (
 )
 from ..utils import utcnow
 from .compat_common import (
+    RESET_PASSWORD,
+    VERIFY_EMAIL,
     CompatError,
+    consume_auth_token,
     data_anchor,
     decode_token,
     ensure_seed_users,
@@ -51,7 +54,9 @@ from .compat_common import (
     get_space,
     hash_password,
     iso_z,
+    issue_auth_token,
     latest_reading_per_room,
+    purge_expired_tokens,
     not_found,
     ok,
     require_admin,
@@ -135,7 +140,9 @@ def compat_me(user: AppUser = Depends(require_user)):
 
 
 @router.post("/auth/signup", summary="[호환] 회원가입 (A-05)")
-async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
+async def compat_signup(
+    payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
+):
     body = payload or {}
     login_id = (body.get("loginId") or "").strip()
     password = body.get("password") or ""
@@ -191,8 +198,132 @@ async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
     )
     db.add(user)
     db.commit()
+
+    # 인증 메일을 보낸다. 메일 서버가 죽어 있어도 가입 자체는 성공시킨다 —
+    # 인증은 나중에 다시 보낼 수 있고, 여기서 실패시키면 계정만 사라진다.
+    _send_verification(db, request, user)
+
     logger.info("[호환] 회원가입 신청: %s", login_id)
-    return ok({"userId": user.user_id, "status": user.status})
+    return ok(
+        {
+            "userId": user.user_id,
+            "status": user.status,
+            "emailVerified": False,
+            # 화면이 "메일을 확인하세요" 를 띄울지 판단하는 값
+            "verificationSent": True,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# 이메일 인증 · 비밀번호 재설정
+#
+# 두 기능은 한 쌍이다. 비밀번호를 잊으면 메일로 되찾는데, 그 메일 주소가
+# 본인 것이 아니면 남이 계정을 가져갈 수 있다. 그래서 재설정은 인증이 끝난
+# 주소로만 보낸다.
+# ---------------------------------------------------------------------------
+def _link(request: Request, path: str, token: str) -> str:
+    """메일에 넣을 링크. 설정된 공개 주소가 있으면 그것을 쓴다."""
+    base = (settings.public_base_url or "").rstrip("/")
+    if not base:
+        # 리버스 프록시 뒤에서는 틀릴 수 있다. 그래서 PUBLIC_BASE_URL 을 권한다.
+        base = str(request.base_url).rstrip("/")
+    return f"{base}{path}?token={token}"
+
+
+def _send_verification(db: Session, request: Request, user: AppUser) -> None:
+    token = issue_auth_token(
+        db, user, VERIFY_EMAIL, timedelta(hours=settings.email_verify_ttl_hours)
+    )
+    mailer.send_verification(user.email, user.name, _link(request, "/verify-email", token))
+
+
+@router.post("/auth/email/verify", summary="[호환] 이메일 인증 확인")
+async def compat_verify_email(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    user = consume_auth_token(db, (payload or {}).get("token") or "", VERIFY_EMAIL)
+    if user is None:
+        raise CompatError(400, "E4000", "링크가 만료되었거나 이미 사용되었습니다")
+
+    user.email_verified = True
+    db.commit()
+    logger.info("[호환] 이메일 인증 완료: %s", user.login_id)
+    return ok({"verified": True, "loginId": user.login_id})
+
+
+@router.post("/auth/email/resend", summary="[호환] 인증 메일 다시 보내기")
+async def compat_resend_verification(
+    payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
+):
+    """
+    응답은 언제나 같다. 가입된 주소인지 알려주면 어떤 주소가 등록돼 있는지
+    확인하는 수단이 된다.
+    """
+    email = ((payload or {}).get("email") or "").strip()
+    if email:
+        user = db.query(AppUser).filter(func.lower(AppUser.email) == email.lower()).first()
+        if user is not None and not user.email_verified:
+            _send_verification(db, request, user)
+    return ok({"sent": True})
+
+
+@router.post("/auth/password/forgot", summary="[호환] 비밀번호 재설정 요청")
+async def compat_forgot_password(
+    payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
+):
+    """
+    가입한 이메일로 재설정 링크를 보낸다.
+
+    주소가 없든, 인증이 안 됐든, 메일 발송이 실패했든 응답은 같다.
+    다르게 답하면 어떤 주소가 가입돼 있는지 알아내는 데 쓰인다.
+    """
+    ensure_seed_users(db)
+    purge_expired_tokens(db)
+
+    email = ((payload or {}).get("email") or "").strip()
+    if email:
+        user = db.query(AppUser).filter(func.lower(AppUser.email) == email.lower()).first()
+        # 인증되지 않은 주소로는 보내지 않는다. 아무 주소나 적어두고 그 주소로
+        # 재설정 링크를 받을 수 있으면 이메일을 확인하는 의미가 없다.
+        if user is not None and user.email_verified:
+            token = issue_auth_token(
+                db,
+                user,
+                RESET_PASSWORD,
+                timedelta(minutes=settings.password_reset_ttl_minutes),
+            )
+            mailer.send_password_reset(
+                user.email, user.name, _link(request, "/reset-password", token)
+            )
+            logger.info("[호환] 비밀번호 재설정 링크 발송: %s", user.login_id)
+        else:
+            logger.info("[호환] 비밀번호 재설정 요청 — 보낼 대상 없음")
+
+    return ok({"sent": True})
+
+
+@router.post("/auth/password/reset", summary="[호환] 비밀번호 재설정 완료")
+async def compat_reset_password(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    body = payload or {}
+    new_password = body.get("newPassword") or ""
+    confirm = body.get("passwordConfirm")
+
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise CompatError(
+            400, "E4000", f"비밀번호는 {MIN_PASSWORD_LENGTH}자 이상이어야 합니다"
+        )
+    if confirm is not None and new_password != confirm:
+        raise CompatError(400, "E4000", "비밀번호가 서로 다릅니다")
+
+    # 토큰 확인은 비밀번호 검사 뒤에 한다. 형식이 틀렸다고 토큰을 태워버리면
+    # 사용자가 링크를 다시 받아야 한다.
+    user = consume_auth_token(db, body.get("token") or "", RESET_PASSWORD)
+    if user is None:
+        raise CompatError(400, "E4000", "링크가 만료되었거나 이미 사용되었습니다")
+
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    logger.info("[호환] 비밀번호 재설정 완료: %s", user.login_id)
+    return ok({"changed": True})
 
 
 @router.get("/auth/check-id", summary="[호환] 아이디 중복 확인 (A-06)")
