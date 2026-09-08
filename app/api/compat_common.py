@@ -96,7 +96,21 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def issue_token(kind: str, user_id: str) -> str:
+def password_fingerprint(password_hash: str) -> str:
+    """
+    현재 비밀번호를 나타내는 짧은 값. 토큰에 함께 실어 둔다.
+
+    비밀번호가 바뀌면 이 값도 바뀌므로, 예전에 발급된 토큰은 그 자리에서
+    쓸 수 없게 된다. 계정을 빼앗긴 사람이 비밀번호를 되찾았는데 공격자의
+    세션이 14일 동안 살아 있으면 재설정하는 의미가 없다.
+
+    해시 자체를 싣지 않고 다시 한 번 요약해서 넣는다. 토큰은 사용자에게
+    그대로 전달되므로 저장된 해시가 새어 나가면 안 된다.
+    """
+    return hashlib.sha256(f"pwd:{password_hash}".encode("utf-8")).hexdigest()[:16]
+
+
+def issue_token(kind: str, user_id: str, password_hash: str = "") -> str:
     settings = get_settings()
     ttl = (
         timedelta(minutes=settings.auth_access_ttl_minutes)
@@ -106,6 +120,7 @@ def issue_token(kind: str, user_id: str) -> str:
     payload = {
         "u": user_id,
         "k": kind,
+        "p": password_fingerprint(password_hash),
         "exp": int((datetime.now(timezone.utc) + ttl).timestamp()),
     }
     body = _b64(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
@@ -113,8 +128,13 @@ def issue_token(kind: str, user_id: str) -> str:
     return f"{body}.{signature}"
 
 
-def decode_token(token: str, kind: str) -> Optional[str]:
-    """유효하면 user_id, 아니면 None. 위조·만료·종류 불일치를 모두 걸러낸다."""
+def decode_token(token: str, kind: str, password_hash: Optional[str] = None) -> Optional[str]:
+    """
+    유효하면 user_id, 아니면 None. 위조·만료·종류 불일치를 모두 걸러낸다.
+
+    password_hash 를 주면 발급 당시의 비밀번호와 같은지도 본다. 다르면
+    비밀번호가 바뀐 뒤에 남아 있는 토큰이므로 거절한다.
+    """
     try:
         body, signature = token.split(".")
         expected = _b64(hmac.new(_TOKEN_KEY, body.encode("ascii"), hashlib.sha256).digest())
@@ -126,8 +146,19 @@ def decode_token(token: str, kind: str) -> Optional[str]:
 
     if payload.get("k") != kind:
         return None
-    if int(payload.get("exp", 0)) < int(datetime.now(timezone.utc).timestamp()):
+    try:
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
         return None
+    if expires_at < int(datetime.now(timezone.utc).timestamp()):
+        return None
+
+    if password_hash is not None:
+        if not hmac.compare_digest(
+            str(payload.get("p", "")), password_fingerprint(password_hash)
+        ):
+            return None
+
     return payload.get("u")
 
 
@@ -320,7 +351,8 @@ def require_user(
     if not authorization or not authorization.lower().startswith("bearer "):
         raise unauthorized()
 
-    user_id = decode_token(authorization.split(" ", 1)[1].strip(), "access")
+    raw_token = authorization.split(" ", 1)[1].strip()
+    user_id = decode_token(raw_token, "access")
     if user_id is None:
         # 만료도 위조도 같은 코드로 돌려준다. 프론트가 이 코드를 보고 토큰을 갱신한다.
         raise unauthorized("세션이 만료되었습니다")
@@ -328,6 +360,12 @@ def require_user(
     user = db.get(AppUser, user_id)
     if user is None or user.status != "ACTIVE":
         raise unauthorized()
+
+    # 비밀번호가 바뀐 뒤에 남아 있는 토큰이면 거절한다. 계정을 되찾으려고
+    # 비밀번호를 바꿨는데 남의 세션이 계속 살아 있으면 되찾은 게 아니다.
+    if decode_token(raw_token, "access", user.password_hash) is None:
+        raise unauthorized("비밀번호가 바뀌었습니다. 다시 로그인하세요")
+
     return user
 
 

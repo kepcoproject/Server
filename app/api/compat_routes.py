@@ -84,14 +84,38 @@ LOGIN_ID_PATTERN = re.compile(r"[A-Za-z0-9_]+")
 EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
 
+def _text(body: Dict[str, Any], field: str, label: str, *, strip: bool = True) -> str:
+    """
+    본문에서 문자열 값을 꺼낸다. 없으면 빈 문자열.
+
+    그냥 (body.get(x) or "").strip() 을 쓰면 숫자나 배열이 왔을 때 AttributeError 가
+    올라가 500 이 난다. 인증이 없는 경로들이라 아무나 500 을 만들 수 있었고,
+    500 응답에는 봉투가 없어 화면이 사유를 읽지도 못한다.
+    """
+    value = body.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CompatError(400, "E4000", f"{label} 값이 올바르지 않습니다")
+    return value.strip() if strip else value
+
+
+def _optional_text(body: Dict[str, Any], field: str, label: str) -> Optional[str]:
+    """보내지 않은 것(None)과 빈 값을 구분해야 하는 항목에 쓴다."""
+    if body.get(field) is None:
+        return None
+    return _text(body, field, label, strip=False)
+
+
 # ---------------------------------------------------------------------------
 # 인증
 # ---------------------------------------------------------------------------
 @router.post("/auth/login", summary="[호환] 로그인 (A-01)")
 async def compat_login(payload: Dict[str, Any], db: Session = Depends(get_db)):
     ensure_seed_users(db)
-    login_id = (payload or {}).get("loginId") or ""
-    password = (payload or {}).get("password") or ""
+    body = payload or {}
+    login_id = _text(body, "loginId", "아이디")
+    password = _text(body, "password", "비밀번호", strip=False)
 
     user = db.query(AppUser).filter_by(login_id=login_id).first()
     if user is None or not verify_password(password, user.password_hash):
@@ -108,8 +132,8 @@ async def compat_login(payload: Dict[str, Any], db: Session = Depends(get_db)):
     logger.info("[호환] 로그인: %s", login_id)
     return ok(
         {
-            "accessToken": issue_token("access", user.user_id),
-            "refreshToken": issue_token("refresh", user.user_id),
+            "accessToken": issue_token("access", user.user_id, user.password_hash),
+            "refreshToken": issue_token("refresh", user.user_id, user.password_hash),
             "user": user_out(user),
         }
     )
@@ -118,7 +142,8 @@ async def compat_login(payload: Dict[str, Any], db: Session = Depends(get_db)):
 @router.post("/auth/refresh", summary="[호환] 토큰 갱신 (A-02)")
 async def compat_refresh(payload: Dict[str, Any], db: Session = Depends(get_db)):
     ensure_seed_users(db)
-    user_id = decode_token((payload or {}).get("refreshToken") or "", "refresh")
+    raw_token = (payload or {}).get("refreshToken") or ""
+    user_id = decode_token(raw_token, "refresh")
     if user_id is None:
         raise unauthorized("리프레시 토큰이 유효하지 않습니다")
 
@@ -126,10 +151,15 @@ async def compat_refresh(payload: Dict[str, Any], db: Session = Depends(get_db))
     if user is None or user.status != "ACTIVE":
         raise unauthorized("리프레시 토큰이 유효하지 않습니다")
 
+    # 비밀번호가 바뀐 뒤의 토큰이면 여기서 끊는다. 액세스 토큰은 1시간이면
+    # 만료되지만 리프레시는 14일이라, 여기를 막지 않으면 재설정이 무의미하다.
+    if decode_token(raw_token, "refresh", user.password_hash) is None:
+        raise unauthorized("비밀번호가 바뀌었습니다. 다시 로그인하세요")
+
     return ok(
         {
-            "accessToken": issue_token("access", user.user_id),
-            "refreshToken": issue_token("refresh", user.user_id),
+            "accessToken": issue_token("access", user.user_id, user.password_hash),
+            "refreshToken": issue_token("refresh", user.user_id, user.password_hash),
         }
     )
 
@@ -144,11 +174,11 @@ async def compat_signup(
     payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
 ):
     body = payload or {}
-    login_id = (body.get("loginId") or "").strip()
-    password = body.get("password") or ""
-    password_confirm = body.get("passwordConfirm")
-    name = (body.get("name") or "").strip()
-    email = (body.get("email") or "").strip()
+    login_id = _text(body, "loginId", "아이디")
+    password = _text(body, "password", "비밀번호", strip=False)
+    password_confirm = _optional_text(body, "passwordConfirm", "비밀번호 확인")
+    name = _text(body, "name", "이름")
+    email = _text(body, "email", "이메일")
 
     # 화면에서도 막지만 서버에서 다시 본다. API 를 직접 호출하면 화면 검증을 건너뛸 수 있다.
     if not login_id:
@@ -240,7 +270,8 @@ def _send_verification(db: Session, request: Request, user: AppUser) -> None:
 
 @router.post("/auth/email/verify", summary="[호환] 이메일 인증 확인")
 async def compat_verify_email(payload: Dict[str, Any], db: Session = Depends(get_db)):
-    user = consume_auth_token(db, (payload or {}).get("token") or "", VERIFY_EMAIL)
+    token = _text(payload or {}, "token", "인증 링크")
+    user = consume_auth_token(db, token, VERIFY_EMAIL)
     if user is None:
         raise CompatError(400, "E4000", "링크가 만료되었거나 이미 사용되었습니다")
 
@@ -258,7 +289,7 @@ async def compat_resend_verification(
     응답은 언제나 같다. 가입된 주소인지 알려주면 어떤 주소가 등록돼 있는지
     확인하는 수단이 된다.
     """
-    email = ((payload or {}).get("email") or "").strip()
+    email = _text(payload or {}, "email", "이메일")
     if email:
         user = db.query(AppUser).filter(func.lower(AppUser.email) == email.lower()).first()
         if user is not None and not user.email_verified:
@@ -279,7 +310,7 @@ async def compat_forgot_password(
     ensure_seed_users(db)
     purge_expired_tokens(db)
 
-    email = ((payload or {}).get("email") or "").strip()
+    email = _text(payload or {}, "email", "이메일")
     if email:
         user = db.query(AppUser).filter(func.lower(AppUser.email) == email.lower()).first()
         # 인증되지 않은 주소로는 보내지 않는다. 아무 주소나 적어두고 그 주소로
@@ -304,8 +335,8 @@ async def compat_forgot_password(
 @router.post("/auth/password/reset", summary="[호환] 비밀번호 재설정 완료")
 async def compat_reset_password(payload: Dict[str, Any], db: Session = Depends(get_db)):
     body = payload or {}
-    new_password = body.get("newPassword") or ""
-    confirm = body.get("passwordConfirm")
+    new_password = _text(body, "newPassword", "새 비밀번호", strip=False)
+    confirm = _optional_text(body, "passwordConfirm", "비밀번호 확인")
 
     if len(new_password) < MIN_PASSWORD_LENGTH:
         raise CompatError(
@@ -316,7 +347,7 @@ async def compat_reset_password(payload: Dict[str, Any], db: Session = Depends(g
 
     # 토큰 확인은 비밀번호 검사 뒤에 한다. 형식이 틀렸다고 토큰을 태워버리면
     # 사용자가 링크를 다시 받아야 한다.
-    user = consume_auth_token(db, body.get("token") or "", RESET_PASSWORD)
+    user = consume_auth_token(db, _text(body, "token", "재설정 링크"), RESET_PASSWORD)
     if user is None:
         raise CompatError(400, "E4000", "링크가 만료되었거나 이미 사용되었습니다")
 
@@ -338,14 +369,24 @@ async def compat_change_password(
     payload: Dict[str, Any], user: AppUser = Depends(require_user), db: Session = Depends(get_db)
 ):
     body = payload or {}
-    if not verify_password(body.get("currentPassword") or "", user.password_hash):
+    current = _text(body, "currentPassword", "현재 비밀번호", strip=False)
+    new_password = _text(body, "newPassword", "새 비밀번호", strip=False)
+    if not verify_password(current, user.password_hash):
         raise CompatError(400, "E4001", "현재 비밀번호가 올바르지 않습니다")
-    new_password = body.get("newPassword") or ""
     if len(new_password) < 8:
         raise CompatError(400, "E4002", "새 비밀번호는 8자 이상이어야 합니다")
     user.password_hash = hash_password(new_password)
     db.commit()
-    return ok({"changed": True})
+
+    # 비밀번호가 바뀌면 예전 토큰은 전부 무효가 된다(다른 기기의 세션도 끊긴다).
+    # 방금 스스로 바꾼 사람까지 로그아웃시킬 이유는 없으므로 새 토큰을 함께 준다.
+    return ok(
+        {
+            "changed": True,
+            "accessToken": issue_token("access", user.user_id, user.password_hash),
+            "refreshToken": issue_token("refresh", user.user_id, user.password_hash),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
