@@ -231,7 +231,29 @@ def test_space_with_nodes_cannot_be_deleted():
         target = next(s for s in items if s["code"] == "ROOM-800")
         resp = client.delete(f"/spaces/{target['spaceId']}", headers=headers)
     assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "E4091"
+    # 화면(Spaces.jsx)이 E4090 을 보고 "연결된 센서 노드를 먼저 해제하세요" 를 띄운다.
+    # 다른 코드로 바꾸면 사유가 안 보이고 "삭제에 실패했습니다" 만 나온다.
+    assert resp.json()["error"]["code"] == "E4090"
+
+
+def test_node_can_be_deleted_then_space_deletes():
+    """
+    공간 삭제가 '노드를 먼저 해제하라'고 막는데 해제할 API 가 없어 막다른 길이었다.
+    노드 삭제 -> 공간 삭제가 이어져야 한다.
+    """
+    _seed(building="keep-d", floor="f2", room="room-810", device_id="KEEP-NODE-810")
+    with TestClient(app) as client:
+        headers = _login(client)
+        items = client.get("/spaces", headers=headers).json()["data"]["items"]
+        target = next(s for s in items if s["code"] == "ROOM-810")
+
+        assert client.delete(f"/spaces/{target['spaceId']}", headers=headers).status_code == 409
+
+        assert client.delete("/devices/KEEP-NODE-810", headers=headers).status_code == 200
+        assert client.get("/devices/KEEP-NODE-810", headers=headers).status_code == 404
+
+        assert client.delete(f"/spaces/{target['spaceId']}", headers=headers).status_code == 200
+        assert client.get(f"/spaces/{target['spaceId']}", headers=headers).status_code == 404
 
 
 # ---------------------------------------------------------------------------

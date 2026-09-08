@@ -182,7 +182,11 @@ def compat_delete_space(
     )
     if node_count:
         # 노드가 남아 있는 공간을 지우면 측정값의 소속이 사라진다.
-        raise CompatError(409, "E4091", f"노드 {node_count}개가 등록된 공간은 삭제할 수 없습니다")
+        # 코드는 E4090 이어야 한다. 화면(Spaces.jsx)이 이 값을 보고
+        # "연결된 센서 노드를 먼저 해제하세요" 를 띄운다. 다른 코드면 사유가 안 보인다.
+        raise CompatError(
+            409, "E4090", f"노드 {node_count}개가 등록된 공간은 삭제할 수 없습니다"
+        )
     db.delete(space)
     db.commit()
     return ok({"deleted": True})
@@ -251,6 +255,34 @@ def compat_get_device(
     if device is None:
         raise not_found("노드를 찾을 수 없습니다")
     return ok(_device_out(db, device))
+
+
+@router.delete("/devices/{device_id}", summary="[호환] 노드 삭제")
+def compat_delete_device(
+    device_id: str, user: AppUser = Depends(require_admin), db: Session = Depends(get_db)
+):
+    """
+    노드를 등록 해제한다.
+
+    공간 삭제(B-05)가 "노드를 먼저 해제하라"고 막는데 정작 해제할 방법이 없어서
+    막다른 길이었다. 그 출구를 만든다.
+
+    측정값은 Device.readings 의 cascade 로 함께 사라진다. 노드를 지운다는 건
+    그 자리의 측정 이력도 지운다는 뜻이라 화면에서 되돌릴 수 없다.
+    """
+    device = db.get(Device, device_id)
+    if device is None:
+        raise not_found("노드를 찾을 수 없습니다")
+
+    # DeviceMeta 는 FK 가 아니라 같은 키를 쓰는 별도 표라 직접 지운다.
+    meta = db.get(DeviceMeta, device_id)
+    if meta is not None:
+        db.delete(meta)
+
+    db.delete(device)
+    db.commit()
+    logger.info("[호환] 노드 삭제: %s", device_id)
+    return ok({"deleted": True})
 
 
 @router.post("/devices", summary="[호환] 노드 등록 (C-01)")
@@ -368,8 +400,12 @@ async def compat_post_control(
         )
         .all()
     )
-    anchor = data_anchor(db)
-    if not any(_device_status(d, anchor) == "ONLINE" for d in devices):
+    # 목록 화면과 달리 여기서는 데이터 기준 시각(anchor)이 아니라 진짜 현재 시각으로 본다.
+    # anchor 는 "DB 에서 가장 최근 측정값" 이라, 데이터가 사흘 전에 멈춰 있어도
+    # 그 시점 기준으로는 모든 노드가 ONLINE 이 된다. 목록에서는 그게 맞지만,
+    # 제어는 지금 당장 명령을 가져갈 노드가 있어야 성립한다. anchor 로 판정하면
+    # 화면은 "온라인"이라 해놓고 명령은 아무도 안 가져가서 15초 뒤 "응답 없음"만 뜬다.
+    if not any(_device_status(d, utcnow()) == "ONLINE" for d in devices):
         raise CompatError(503, "E5030", "센서 노드가 오프라인입니다")
 
     command = ControlCommand(

@@ -40,6 +40,11 @@ from .compat_common import to_epoch
 
 logger = logging.getLogger("smart_energy.device")
 
+# 접수된 명령을 노드가 이 시간 안에 가져가지 않으면 버린다.
+# 화면은 15초 뒤 "응답 없음"으로 포기하는데, 서버에 PENDING 이 그대로 남아 있으면
+# 몇 시간 뒤 노드가 붙는 순간 그 오래된 명령이 실행된다. 조명이 저절로 꺼지는 셈이다.
+COMMAND_TTL_SECONDS = 300
+
 router = APIRouter(tags=["sensor-node"])
 
 settings = get_settings()
@@ -193,9 +198,27 @@ def poll_actuator(
         return Response(status_code=204)
 
     if command.status == "PENDING":
+        now = utcnow()
+        if (now - command.created_at).total_seconds() > COMMAND_TTL_SECONDS:
+            # 화면은 이미 포기한 명령이다. 지금 실행하면 사용자가 의도하지 않은 시점에
+            # 조명이 바뀐다. 실패로 닫고 아무것도 내려보내지 않는다.
+            command.status = "FAILED"
+            command.completed_at = now
+            db.add(
+                ControlLog(
+                    space_id=command.space_id,
+                    action=command.action,
+                    value=command.value,
+                    trigger=command.trigger,
+                    result="FAILED",
+                )
+            )
+            db.commit()
+            logger.info("제어 만료: %s %s", space.space_id, command.command_id)
+            return Response(status_code=204)
+
         # 펌웨어가 실행 결과를 되돌려주지 않으므로, 가져간 시점을 실행으로 본다.
         # 노드가 실제로 릴레이를 못 돌린 경우는 서버가 알 수 없다.
-        now = utcnow()
         command.status = "COMPLETED"
         command.delivered_at = now
         command.completed_at = now

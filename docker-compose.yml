@@ -21,6 +21,8 @@ services:
       args:
         # 프론트를 이 접두사로 빌드한다. 아래 COMPAT_API_PREFIX 와 반드시 같아야 한다.
         API_PREFIX: /client-api
+    # 아래 simulator 가 이 이미지를 그대로 쓴다 (따로 빌드하지 않는다)
+    image: smart-energy-backend:latest
     container_name: smart-energy-backend
     restart: unless-stopped
     ports:
@@ -52,6 +54,40 @@ services:
       MQTT_ENABLED: "false"
     volumes:
       - sqlite-data:/data
+
+  # 시연용 가상 노드.
+  #
+  # 실물 ESP32 없이 조명 켜기/끄기가 "완료"까지 가는 걸 보여준다.
+  # 제어는 노드가 명령을 가져가야 완료되는데, 붙어 있는 노드가 없으면
+  # 화면은 15초 뒤 "응답 없음"만 띄운다.
+  #
+  # 평소에는 뜨지 않는다. 시연할 때만 켠다:
+  #     docker compose --profile demo up -d
+  # 끌 때:
+  #     docker compose --profile demo stop simulator
+  simulator:
+    profiles: ["demo"]
+    # backend 와 똑같은 이미지다. build 를 같이 적어두면 이미지가 아직 없을 때
+    # Docker Hub 에서 받으려다 실패하는 일이 없다 (이미 만들어져 있으면 캐시로 즉시 끝난다).
+    image: smart-energy-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+      args:
+        API_PREFIX: /client-api
+    container_name: smart-energy-simulator
+    restart: unless-stopped
+    depends_on:
+      - backend
+    # 폴링을 5초로 둔다. 화면이 15초 만에 포기하므로 그보다 넉넉히 짧아야 한다.
+    command: >
+      python scripts/simulate_http_node.py
+      --base-url http://backend:8000
+      --node-key SIM-NODE-102
+      --space-id 1
+      --interval 5
+      --poll-interval 5
 
 volumes:
   sqlite-data:
