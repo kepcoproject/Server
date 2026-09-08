@@ -250,3 +250,51 @@ def test_control_rejects_node_that_is_only_online_by_stale_data():
 
     assert resp.status_code == 503
     assert resp.json()["error"]["code"] == "E5030"
+
+
+def test_ingest_rejects_malformed_values_instead_of_crashing():
+    """
+    이 경로는 인증이 없다. 펌웨어가 아닌 무언가가 이상한 값을 보내도 500 이 나면
+    안 된다. space_id 에 객체를 넣으면 "{'a': 1}" 이라는 이름의 공간까지 생겼다.
+    """
+    with TestClient(app) as client:
+        bad_bodies = [
+            {"node_key": "node-bad", "space_id": 5100, "current_amp": "abc"},
+            {"node_key": "node-bad", "space_id": 5100, "current_amp": [1, 2]},
+            {"node_key": "node-bad", "space_id": 5100, "light_lux": "밝음"},
+            {"node_key": "node-bad", "space_id": 5100, "occupancy": "네"},
+            {"node_key": "node-bad", "space_id": {"a": 1}},
+            {"node_key": "node-bad", "space_id": "../../etc/passwd"},
+        ]
+        for body in bad_bodies:
+            resp = client.post("/api/sensors/data", json=body)
+            assert resp.status_code == 400, f"{body} -> {resp.status_code}"
+
+        # 멀쩡한 요청은 그대로 통해야 한다
+        good = client.post("/api/sensors/data", json=_firmware_payload("node-good", 5101))
+        assert good.status_code == 200
+
+    db = SessionLocal()
+    try:
+        # 쓰레기 공간이 만들어지지 않았는지 본다
+        junk = [s.space_id for s in db.query(Space).all() if "{" in s.space_id or "/" in s.space_id]
+        assert junk == [], junk
+    finally:
+        db.close()
+
+
+def test_ingest_accepts_string_numbers_from_firmware():
+    """JSON 직렬화 방식에 따라 숫자가 문자열로 올 수 있다. 이건 받아줘야 한다."""
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/sensors/data",
+            json={
+                "node_key": "node-strnum",
+                "space_id": "5200",
+                "current_amp": "1.5",
+                "light_lux": "300",
+                "occupancy": "true",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["powerW"] == round(1.5 * settings.sensor_line_voltage, 2)

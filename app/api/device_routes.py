@@ -18,6 +18,7 @@ HTTP를 쓴다. 브로커 없이 백엔드에 바로 POST하고, 제어 명령�
 펌웨어가 doc["action"] 을 그대로 읽기 때문에 평범한 JSON으로 내보내야 한다.
 """
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -50,6 +51,66 @@ router = APIRouter(tags=["sensor-node"])
 settings = get_settings()
 
 
+class IngestError(Exception):
+    """수집 본문이 잘못됐을 때. 400 으로 돌려주기 위한 신호."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+# 노드가 보낼 수 있는 space_id 의 모양. 펌웨어는 정수, 화면은 "sp-1" 을 쓴다.
+SPACE_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _number(body: Dict[str, Any], field: str) -> Optional[float]:
+    """
+    측정값을 실수로 바꾼다.
+
+    이 경로는 인증이 없다. 펌웨어가 아닌 무언가가 문자열이나 배열을 보내면
+    float() 가 그대로 터져 500 이 났고, SQLAlchemy 까지 넘어간 값은
+    INSERT 단계에서 터졌다. 여기서 걸러 400 으로 돌려준다.
+    """
+    value = body.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise IngestError(f"{field} 값이 숫자가 아닙니다")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise IngestError(f"{field} 값이 숫자가 아닙니다")
+
+
+def _occupancy(body: Dict[str, Any]) -> Optional[bool]:
+    """재실 여부. 불리언 컬럼이라 애매한 값을 그대로 넣으면 INSERT 에서 터진다."""
+    value = body.get("occupancy")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0"):
+        return value.strip().lower() in ("true", "1")
+    raise IngestError("occupancy 값이 참/거짓이 아닙니다")
+
+
+def _space_key(raw: Any) -> str:
+    """
+    space_id 를 문자열 키로 바꾼다.
+
+    str(raw) 를 그대로 쓰면 {"a": 1} 같은 본문이 "{'a': 1}" 이라는 이름의 공간을
+    만들어 버린다. 인증이 없는 경로라 아무나 공간 목록을 더럽힐 수 있었다.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise IngestError("space_id 형식이 올바르지 않습니다")
+    key = str(raw).strip()
+    if not SPACE_KEY_PATTERN.fullmatch(key):
+        raise IngestError("space_id 형식이 올바르지 않습니다")
+    return key
+
+
 def resolve_space(db: Session, raw: Any) -> Optional[Space]:
     """
     펌웨어의 SPACE_ID 는 정수(1)이고 화면 쪽 spaceId 는 문자열("sp-1")이다.
@@ -57,7 +118,7 @@ def resolve_space(db: Session, raw: Any) -> Optional[Space]:
     """
     if raw is None:
         return None
-    key = str(raw).strip()
+    key = _space_key(raw)
     space = db.get(Space, key)
     if space is not None:
         return space
@@ -72,7 +133,7 @@ def _auto_create_space(db: Session, raw: Any) -> Space:
     노드를 처음 켰을 때 데이터가 버려지지 않도록 하기 위한 것이고,
     이름은 화면(공간 관리)에서 고치면 된다.
     """
-    key = str(raw).strip()
+    key = _space_key(raw)
     space_id = f"sp-{key}" if key.isdigit() else key
     space = Space(
         space_id=space_id,
@@ -109,11 +170,17 @@ async def ingest_sensor_data(payload: Dict[str, Any], db: Session = Depends(get_
     if not node_key:
         return JSONResponse(status_code=400, content={"error": "node_key가 없습니다"})
 
-    space = resolve_space(db, body.get("space_id"))
-    if space is None:
-        if body.get("space_id") is None:
-            return JSONResponse(status_code=400, content={"error": "space_id가 없습니다"})
-        space = _auto_create_space(db, body.get("space_id"))
+    try:
+        space = resolve_space(db, body.get("space_id"))
+        if space is None:
+            if body.get("space_id") is None:
+                return JSONResponse(status_code=400, content={"error": "space_id가 없습니다"})
+            space = _auto_create_space(db, body.get("space_id"))
+        current_amp = _number(body, "current_amp")
+        lux = _number(body, "light_lux")
+        occupancy = _occupancy(body)
+    except IngestError as exc:
+        return JSONResponse(status_code=400, content={"error": exc.message})
 
     now = utcnow()
 
@@ -136,20 +203,17 @@ async def ingest_sensor_data(payload: Dict[str, Any], db: Session = Depends(get_
     device.status = DeviceStatusEnum.online
     device.last_seen = now
 
-    current_amp = body.get("current_amp")
-    power_w = (
-        float(current_amp) * settings.sensor_line_voltage if current_amp is not None else None
-    )
+    power_w = current_amp * settings.sensor_line_voltage if current_amp is not None else None
 
     reading = SensorReading(
         device_id=node_key,
         building=space.building,
         floor=space.floor,
         room_id=space.room_id,
-        occupancy=body.get("occupancy"),
+        occupancy=occupancy,
         power=round(power_w, 2) if power_w is not None else None,
         temp=None,  # 노드에 온도 센서가 없다
-        lux=body.get("light_lux"),
+        lux=lux,
         # 펌웨어가 시각을 보내지 않으므로 서버 수신 시각을 측정 시각으로 삼는다.
         # utcnow() 는 tzinfo 를 뗀 UTC라, 그냥 .timestamp() 하면 로컬 시간대로
         # 해석되어 어긋난다(KST면 9시간). to_epoch 가 UTC로 못박아 변환한다.
@@ -162,9 +226,9 @@ async def ingest_sensor_data(payload: Dict[str, Any], db: Session = Depends(get_
         "수집: node=%s space=%s occ=%s power=%.1fW lux=%s",
         node_key,
         space.space_id,
-        body.get("occupancy"),
+        occupancy,
         power_w or 0.0,
-        body.get("light_lux"),
+        lux,
     )
     return {"stored": True, "spaceId": space.space_id, "powerW": reading.power}
 

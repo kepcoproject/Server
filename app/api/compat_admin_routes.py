@@ -71,6 +71,22 @@ INTERVAL_MINUTES = {"1m": 1, "10m": 10, "1h": 60}
 OFFLINE_AFTER_SECONDS = 180
 
 
+def _as_number(value: Any, field: str, cast=int, default=None):
+    """
+    화면에서 온 숫자 값을 안전하게 바꾼다.
+
+    그냥 int(...) 를 쓰면 "이층" 같은 값이 들어왔을 때 ValueError 가 그대로 올라가
+    500 이 난다. 500 은 봉투({success, data, error})가 없어서 화면이 사유를 읽지도
+    못하고 "요청에 실패했습니다" 만 띄운다. 400 으로 내려 이유를 보이게 한다.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise CompatError(400, "E4000", f"{field} 값이 올바르지 않습니다")
+
+
 # ---------------------------------------------------------------------------
 # 공간 (B-01 ~ B-05)
 # ---------------------------------------------------------------------------
@@ -110,7 +126,7 @@ async def compat_create_space(
         raise CompatError(400, "E4000", "공간 코드를 입력하세요")
 
     building_label = body.get("building") or "미지정"
-    floor_no = int(body.get("floor") or 0)
+    floor_no = _as_number(body.get("floor"), "층", int, 0)
 
     # 센서 토픽과 이어질 위치. 화면에서 만든 공간은 아직 센서가 없으므로
     # 코드에서 유추해 두고, 실제 측정값이 들어오면 그 위치로 맞춰진다.
@@ -131,7 +147,7 @@ async def compat_create_space(
         name=body.get("name") or code,
         building_label=building_label,
         floor_number=floor_no,
-        rated_power_w=float(body.get("ratedPowerW") or 0),
+        rated_power_w=_as_number(body.get("ratedPowerW"), "정격 전력", float, 0.0),
         status="정상",
         building=location[0],
         floor=location[1],
@@ -159,9 +175,11 @@ async def compat_update_space(
     if "building" in body and body["building"]:
         space.building_label = body["building"]
     if "floor" in body and body["floor"] is not None:
-        space.floor_number = int(body["floor"])
+        space.floor_number = _as_number(body["floor"], "층", int, space.floor_number)
     if "ratedPowerW" in body and body["ratedPowerW"] is not None:
-        space.rated_power_w = float(body["ratedPowerW"])
+        space.rated_power_w = _as_number(
+            body["ratedPowerW"], "정격 전력", float, space.rated_power_w
+        )
     db.commit()
     return ok(space_out(db, space))
 
@@ -563,6 +581,11 @@ async def compat_update_user(
 
     body = payload or {}
     if body.get("status") in ("ACTIVE", "PENDING", "REJECTED"):
+        if target.user_id == user.user_id and body["status"] != "ACTIVE":
+            # 스스로를 반려하면 그 자리에서 로그인이 막히고, 부트스트랩 관리자도
+            # 아이디가 이미 있으면 다시 만들지 않는다. DB 를 직접 고치기 전에는
+            # 아무도 들어올 수 없다. 권한 해제와 같은 이유로 막는다.
+            raise CompatError(400, "E4003", "자신의 계정 상태는 바꿀 수 없습니다")
         target.status = body["status"]
     if body.get("role") in ("ADMIN", "MEMBER"):
         if target.user_id == user.user_id and body["role"] != "ADMIN":

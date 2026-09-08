@@ -451,3 +451,59 @@ def test_signup_stores_name_and_email_as_given():
     target = next(u for u in items if u["loginId"] == "storeduser")
     assert target["name"] == "김철수"
     assert target["email"] == "chulsoo@example.com"
+
+
+def test_admin_cannot_lock_itself_out():
+    """
+    스스로를 반려하면 그 자리에서 로그인이 막힌다. 부트스트랩 관리자는 아이디가
+    이미 있으면 다시 만들지 않으므로 DB 를 직접 고치기 전에는 아무도 못 들어온다.
+    """
+    with TestClient(app) as client:
+        headers = _login(client)
+        me = client.get("/auth/me", headers=headers).json()["data"]
+
+        resp = client.patch(f"/users/{me['id']}", headers=headers, json={"status": "REJECTED"})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "E4003"
+
+        # 여전히 들어갈 수 있어야 한다
+        assert client.get("/auth/me", headers=headers).status_code == 200
+        assert client.post(
+            "/auth/login", json={"loginId": "demo", "password": "demo1234"}
+        ).status_code == 200
+
+
+def test_bad_number_fields_return_400_not_500():
+    """
+    int("이층") 이 그대로 올라가면 500 이 나는데, 500 응답에는 봉투가 없어
+    화면이 사유를 읽지 못하고 "요청에 실패했습니다" 만 띄운다.
+    """
+    with TestClient(app) as client:
+        headers = _login(client)
+
+        resp = client.post(
+            "/spaces",
+            headers=headers,
+            json={"code": "BAD-1", "name": "방", "building": "b", "floor": "이층"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "E4000"
+
+        resp = client.post(
+            "/spaces",
+            headers=headers,
+            json={"code": "BAD-2", "name": "방", "building": "b", "floor": 1,
+                  "ratedPowerW": "많이"},
+        )
+        assert resp.status_code == 400
+
+        created = client.post(
+            "/spaces",
+            headers=headers,
+            json={"code": "BAD-3", "name": "방", "building": "b", "floor": 1},
+        ).json()["data"]
+        resp = client.patch(
+            f"/spaces/{created['spaceId']}", headers=headers, json={"floor": "삼층"}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "E4000"

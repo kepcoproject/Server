@@ -83,7 +83,10 @@ def seed(hours: int, interval_minutes: int, reset: bool) -> None:
 
             last_moment = now if status == "online" else now - timedelta(hours=3)
             recent_from = last_moment - timedelta(minutes=CURRENT_STATE_MINUTES)
-            for i in range(steps):
+            # range(steps) 면 마지막 측정값이 now 에 닿지 못하고 한 간격 전에서 멈춘다.
+            # 기본 간격 5분 > 오프라인 기준 180초 라서, online 으로 넣은 노드가
+            # 시드 직후부터 화면에 오프라인으로 표시됐다. 끝점을 포함시킨다.
+            for i in range(steps + 1):
                 moment = start + timedelta(minutes=i * interval_minutes)
                 if moment > last_moment:
                     break
