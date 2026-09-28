@@ -420,7 +420,10 @@ def compat_realtime_power(user: AppUser = Depends(require_user), db: Session = D
     for r in latest_reading_per_room(db):
         power_w = r.power or 0.0
         total_w += power_w
-        if not r.occupancy:
+        # 재실 맵(E-01)의 wasteFlag 와 같은 기준이어야 한다. 예전에는 공실이면
+        # 대기전력 몇 W 까지 전부 더해서, 방마다 '정상'으로 표시된 곳의 전력이
+        # 상단 '낭비 전력' 합계에 섞여 들어갔다. 빨간 방은 하나인데 합계가 더 컸다.
+        if not r.occupancy and power_w > WASTE_POWER_W:
             waste_w += power_w
     return ok({"totalW": round(total_w, 1), "wasteW": round(waste_w, 1)})
 

@@ -550,3 +550,27 @@ def test_email_can_only_be_used_once():
     assert "mailthief" not in logins and "mailcase" not in logins
     # 저장은 입력한 그대로 둔다 (소문자로 바꾸지 않는다)
     assert next(u for u in items if u["loginId"] == "mailowner")["email"] == "one@example.com"
+
+
+def test_waste_total_matches_the_rooms_flagged_as_waste():
+    """
+    상단 '낭비 전력' 합계와 방마다의 빨간 표시가 같은 기준이어야 한다.
+    예전에는 공실이면 대기전력까지 더해 '정상'인 방의 전력이 합계에 섞였다.
+    """
+    with TestClient(app) as client:
+        for key, occ, amp in [
+            ("wt-standby-1", False, 0.014),  # 3W 대기전력 — 낭비 아님
+            ("wt-standby-2", False, 0.014),
+            ("wt-waste", False, 0.52),  # 약 114W 공실 — 낭비
+        ]:
+            client.post(
+                "/api/sensors/data",
+                json={"node_key": key, "space_id": f"wt{key[-1]}", "occupancy": occ,
+                      "current_amp": amp, "light_lux": 300},
+            )
+        headers = _login(client)
+        spaces = client.get("/monitoring/occupancy-map", headers=headers).json()["data"]["spaces"]
+        power = client.get("/monitoring/realtime-power", headers=headers).json()["data"]
+
+    flagged = sum(s["powerW"] for s in spaces if s["wasteFlag"])
+    assert abs(power["wasteW"] - flagged) < 0.2, (power["wasteW"], flagged)

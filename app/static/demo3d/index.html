@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>스마트 에너지 3D 시연</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23ffc56b' d='M13 2 4 14h7l-1 8 9-12h-7z'/%3E%3C/svg%3E" />
+  <!--
+    three.js 는 서버에 함께 넣어 두었다 (vendor/). 대회장 네트워크가 CDN 을 막아도
+    화면이 떠야 하기 때문이다. 라이선스는 vendor/LICENSE-three.txt (MIT).
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/"
+      }
+    }
+  </script>
+  <style>
+    :root {
+      --bg: #060a14;
+      --panel: rgba(12, 18, 33, 0.78);
+      --panel-solid: #0e1526;
+      --line: rgba(148, 163, 184, 0.16);
+      --text: #e7ecf5;
+      --muted: #8b97ad;
+      --faint: #5d6982;
+      --accent: #4c8dff;
+      --warm: #ffc56b;
+      --ok: #34c47c;
+      --warn: #ff9f43;
+      --bad: #ff5a5f;
+      --radius: 14px;
+      --font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+        "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font: inherit; color: inherit; }
+
+    #scene { position: fixed; inset: 0; }
+    #scene canvas { display: block; }
+
+    /* ---------- 공통 유리 패널 ---------- */
+    .glass {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      backdrop-filter: blur(14px) saturate(140%);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    /* ---------- 상단 바 ---------- */
+    .topbar {
+      position: fixed; top: 16px; left: 16px; right: 16px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      pointer-events: none; z-index: 5;
+    }
+    .topbar > * { pointer-events: auto; }
+    .brand {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px; margin-right: auto;
+    }
+    .brand svg { flex: none; }
+    .brand b { font-size: 15px; letter-spacing: -0.01em; }
+    .brand small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+
+    .stats { display: flex; gap: 8px; flex-wrap: wrap; }
+    .stat {
+      padding: 9px 14px; min-width: 112px;
+    }
+    .stat .k { color: var(--muted); font-size: 11.5px; }
+    .stat .v {
+      font-size: 19px; font-weight: 700; letter-spacing: -0.02em;
+      font-variant-numeric: tabular-nums; margin-top: 2px;
+    }
+    .stat .v small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+    .stat.bad .v { color: var(--bad); }
+    .stat.link .v { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; margin-top: 5px; }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+    .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(52, 196, 124, 0.18); }
+    .dot.bad { background: var(--bad); box-shadow: 0 0 0 3px rgba(255, 90, 95, 0.18); }
+    .dot.warn { background: var(--warn); }
+    .dot.accent { background: var(--accent); }
+
+    .tools { display: flex; gap: 6px; padding: 6px; }
+    .tool {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 34px; padding: 0 12px; border-radius: 9px;
+      background: transparent; border: 1px solid transparent;
+      color: var(--text); cursor: pointer; white-space: nowrap;
+    }
+    .tool:hover { background: rgba(255, 255, 255, 0.06); }
+    .tool[aria-pressed="true"] { background: rgba(76, 141, 255, 0.16); border-color: rgba(76, 141, 255, 0.4); }
+    .tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* ---------- 방 상세 패널 ---------- */
+    .panel {
+      position: fixed; right: 16px; top: 96px; width: 330px;
+      max-height: calc(100vh - 112px); overflow: auto;
+      padding: 18px; z-index: 6;
+      transition: transform 0.22s ease, opacity 0.22s ease;
+    }
+    .panel[hidden] { display: block; transform: translateX(24px); opacity: 0; pointer-events: none; }
+    .panel-head { display: flex; align-items: flex-start; gap: 10px; }
+    .panel-head h2 { margin: 0; font-size: 19px; letter-spacing: -0.02em; }
+    .panel-head p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+    .close {
+      margin-left: auto; width: 30px; height: 30px; border-radius: 8px;
+      background: transparent; border: 0; cursor: pointer; color: var(--muted);
+      display: grid; place-items: center;
+    }
+    .close:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(255, 255, 255, 0.07); color: var(--muted);
+    }
+    .chip.ok { background: rgba(52, 196, 124, 0.14); color: #6fe0a5; }
+    .chip.bad { background: rgba(255, 90, 95, 0.15); color: #ff8b8e; }
+    .chip.warn { background: rgba(255, 159, 67, 0.15); color: #ffbd7d; }
+
+    .readings {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 16px 0 6px;
+    }
+    .reading {
+      background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line);
+      border-radius: 10px; padding: 9px 11px;
+    }
+    .reading .k { color: var(--muted); font-size: 11.5px; }
+    .reading .v { font-size: 17px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+    .reading .v small { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+
+    .section-label {
+      margin: 18px 0 8px; font-size: 11.5px; color: var(--muted);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .section-label::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btn {
+      height: 40px; border-radius: 10px; cursor: pointer;
+      background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line);
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      font-weight: 600; font-size: 13.5px;
+    }
+    .btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.1); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .btn.wide { grid-column: 1 / -1; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover:not(:disabled) { background: #5d99ff; }
+    .btn.warm { background: rgba(255, 197, 107, 0.14); border-color: rgba(255, 197, 107, 0.35); color: #ffd797; }
+
+    .note { margin-top: 10px; font-size: 12.5px; color: var(--muted); min-height: 18px; }
+    .note.bad { color: #ff8b8e; }
+    .note.ok { color: #6fe0a5; }
+    .meta { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--faint); }
+
+    /* ---------- 이벤트 로그 ---------- */
+    .log {
+      position: fixed; left: 16px; bottom: 16px; width: 380px;
+      padding: 12px 14px; z-index: 5;
+    }
+    .log h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+    .log ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+    .log li {
+      display: grid; grid-template-columns: 8px 52px 1fr; align-items: baseline; gap: 8px;
+      font-size: 12.5px; line-height: 1.45;
+      animation: in 0.3s ease;
+    }
+    .log li .dot { transform: translateY(-1px); }
+    .log time { color: var(--faint); font-variant-numeric: tabular-nums; }
+    /* 안내 문구는 점·시각 칸이 없다. 격자를 풀지 않으면 첫 칸(8px)에 갇혀 세로로 꺾인다. */
+    .log li.empty { display: block; color: var(--faint); font-size: 12.5px; }
+    @keyframes in { from { opacity: 0; transform: translateY(4px); } }
+
+    .hint {
+      position: fixed; right: 16px; bottom: 16px; z-index: 4;
+      padding: 8px 12px; font-size: 12px; color: var(--muted);
+    }
+
+    /* ---------- 3D 라벨 ---------- */
+    .label {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 9px 4px 8px; border-radius: 999px;
+      background: rgba(8, 12, 24, 0.82); border: 1px solid rgba(148, 163, 184, 0.22);
+      color: var(--text); font-family: var(--font); font-size: 12px; font-weight: 600;
+      white-space: nowrap; cursor: pointer; pointer-events: auto; user-select: none;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .label:hover { border-color: rgba(76, 141, 255, 0.7); }
+    .label .w { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+    .label.lit .w { color: var(--warm); }
+    .label.waste { border-color: rgba(255, 90, 95, 0.75); background: rgba(56, 12, 18, 0.88); }
+    .label.waste .w { color: #ff8b8e; }
+    .label.daywaste { border-color: rgba(255, 159, 67, 0.75); }
+    .label.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(76, 141, 255, 0.25); }
+    .flabel {
+      font-family: var(--font); font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+      color: rgba(214, 224, 242, 0.75); pointer-events: none; user-select: none;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); /* 낮의 밝은 콘크리트 위에서도 읽히게 */
+    }
+    .bsign {
+      font-family: var(--font); font-size: 13px; font-weight: 700; letter-spacing: 0.02em;
+      color: var(--text); padding: 5px 12px; border-radius: 8px;
+      background: rgba(8, 12, 24, 0.7); border: 1px solid rgba(148, 163, 184, 0.2);
+      pointer-events: none; user-select: none; white-space: nowrap;
+    }
+
+    /* ---------- 시작 화면 ---------- */
+    .overlay {
+      position: fixed; inset: 0; z-index: 10;
+      display: grid; place-items: center; padding: 16px;
+      background: radial-gradient(ellipse at center, rgba(6, 10, 20, 0.35), rgba(6, 10, 20, 0.85));
+    }
+    .overlay[hidden] { display: none; }
+    .start { width: min(420px, 100%); padding: 28px; }
+    .start h1 { margin: 12px 0 4px; font-size: 22px; letter-spacing: -0.02em; }
+    .start > p { margin: 0 0 20px; color: var(--muted); line-height: 1.55; }
+    .field { display: block; margin-bottom: 10px; }
+    .field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+    .field input {
+      width: 100%; height: 42px; padding: 0 12px; border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05); border: 1px solid var(--line);
+      color: var(--text); font: inherit; font-size: 14.5px;
+    }
+    .field input:focus { outline: none; border-color: var(--accent); background: rgba(76, 141, 255, 0.07); }
+    .start .btn { width: 100%; height: 44px; margin-top: 6px; }
+    .divider { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; color: var(--faint); font-size: 12px; }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+    .start .fine { margin: 12px 0 0; font-size: 12px; color: var(--faint); line-height: 1.5; }
+
+    /* ---------- 좁은 화면 ---------- */
+    @media (max-width: 860px) {
+      .topbar { top: 10px; left: 10px; right: 10px; gap: 8px; }
+      .brand { margin-right: 0; width: 100%; }
+      .stats { width: 100%; }
+      .stat { flex: 1; min-width: 0; padding: 8px 10px; }
+      .stat .v { font-size: 16px; }
+      .tools { width: 100%; justify-content: space-between; }
+      .panel { left: 10px; right: 10px; top: auto; bottom: 10px; width: auto; max-height: 62vh; }
+      .panel[hidden] { transform: translateY(24px); }
+      .log { display: none; }
+      .hint { display: none; }
+      /* 가로로 넓은 건물을 세로 화면에 넣으면 방이 작아져 이름표끼리 겹친다 */
+      .label { font-size: 10px; padding: 2px 7px 2px 6px; gap: 4px; }
+      .label .dot { width: 6px; height: 6px; }
+      .flabel { font-size: 9.5px; }
+      .bsign { font-size: 11px; padding: 3px 9px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .panel, .log li { transition: none; animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="scene" aria-label="3D 가상 건물"></div>
+
+  <!-- 상단 바 -->
+  <header class="topbar">
+    <div class="brand glass">
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="#ffc56b" d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+      <div>
+        <b>스마트 에너지 절약 시스템</b>
+        <small id="mode-label">3D 가상 건물</small>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat glass"><div class="k">총 전력</div><div class="v" id="s-total">0<small>W</small></div></div>
+      <div class="stat glass bad"><div class="k">낭비 전력</div><div class="v" id="s-waste">0<small>W</small></div></div>
+      <div class="stat glass"><div class="k">재실 공간</div><div class="v" id="s-occ">0<small>/ 0</small></div></div>
+      <div class="stat glass link"><div class="k">서버</div><div class="v" id="s-link"><span class="dot"></span><span>대기</span></div></div>
+    </div>
+
+    <div class="tools glass" role="toolbar" aria-label="시연 도구">
+      <button class="tool" id="t-daynight" aria-pressed="false" title="낮과 밤을 바꿉니다">
+        <span id="t-daynight-icon" aria-hidden="true">🌙</span><span id="t-daynight-text">밤</span>
+      </button>
+      <button class="tool" id="t-auto" aria-pressed="false" title="사람들이 알아서 드나듭니다">
+        <span aria-hidden="true">▶</span><span>자동 시나리오</span>
+      </button>
+      <button class="tool" id="t-view" title="처음 시점으로 돌아갑니다">
+        <span aria-hidden="true">⟲</span><span>시점</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 방 상세 -->
+  <aside class="panel glass" id="panel" hidden aria-live="polite">
+    <div class="panel-head">
+      <div>
+        <h2 id="p-title">-</h2>
+        <p id="p-sub">-</p>
+      </div>
+      <button class="close" id="p-close" aria-label="닫기">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div style="margin-top:12px"><span class="chip" id="p-chip"><span class="dot"></span><span>-</span></span></div>
+
+    <div class="readings">
+      <div class="reading"><div class="k">재실</div><div class="v" id="p-occ">0<small>명</small></div></div>
+      <div class="reading"><div class="k">전력</div><div class="v" id="p-power">0<small>W</small></div></div>
+      <div class="reading"><div class="k">조도</div><div class="v" id="p-lux">0<small>lux</small></div></div>
+      <div class="reading"><div class="k">조명</div><div class="v" id="p-light">꺼짐</div></div>
+    </div>
+
+    <div class="section-label">현장 — 사람이 직접</div>
+    <div class="row">
+      <button class="btn" id="p-enter">🚶 들어오기</button>
+      <button class="btn" id="p-leave">🚶 나가기</button>
+      <button class="btn wide warm" id="p-switch">💡 벽 스위치</button>
+    </div>
+
+    <div class="section-label">원격 제어 — 서버를 거쳐 노드로</div>
+    <div class="row">
+      <button class="btn" id="p-remote-on">조명 켜기</button>
+      <button class="btn primary" id="p-remote-off">조명 끄기</button>
+    </div>
+    <div class="note" id="p-note"></div>
+
+    <div class="meta" id="p-meta">-</div>
+  </aside>
+
+  <!-- 이벤트 로그 -->
+  <section class="log glass" aria-label="이벤트 기록">
+    <h3>실시간 기록</h3>
+    <ol id="log"><li class="empty">아직 기록이 없습니다</li></ol>
+  </section>
+
+  <div class="hint glass">드래그로 회전 · 휠로 확대 · 방을 눌러 제어</div>
+
+  <!-- 시작 화면 -->
+  <div class="overlay" id="start">
+    <form class="start glass" id="login" autocomplete="on">
+      <svg width="30" height="30" viewBox="0 0 24 24" aria-hidden="true"><path fill="#ffc56b" d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+      <h1>3D 가상 건물 시연</h1>
+      <p>건물 속 방마다 가상 센서 노드가 붙어 실제 서버로 측정값을 보냅니다. 대시보드에서 조명을 끄면 여기서도 꺼집니다.</p>
+
+      <label class="field"><span>아이디</span><input id="l-id" name="username" autocomplete="username" required /></label>
+      <label class="field"><span>비밀번호</span><input id="l-pw" name="password" type="password" autocomplete="current-password" required /></label>
+      <button class="btn primary" id="l-submit" type="submit">서버에 연결</button>
+      <div class="note bad" id="l-error" role="alert"></div>
+
+      <div class="divider">또는</div>
+      <button class="btn" id="l-offline" type="button">서버 없이 시연하기</button>
+      <p class="fine">서버 없이 시연하면 모든 동작을 이 화면 안에서 흉내 냅니다. 대회장 네트워크가 불안할 때 쓰세요.</p>
+    </form>
+  </div>
+
+  <script type="module" src="./demo3d.js"></script>
+</body>
+</html>

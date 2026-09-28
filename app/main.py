@@ -4,7 +4,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.compat_admin_routes import router as compat_admin_router
@@ -69,6 +70,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 화면 번들과 3D 시연의 three.js 가 수백 KB 라 압축해서 보낸다.
+# 학교·대회장처럼 느린 망에서 첫 화면이 뜨는 시간이 크게 줄어든다.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.include_router(api_router, prefix="/api")
 app.include_router(webhook_router, prefix="/api")
@@ -106,6 +110,24 @@ def health():
         "mqtt_enabled": settings.mqtt_enabled,
         "mqtt_connected": mqtt_service.is_connected(),
     }
+
+
+# ---------------------------------------------------------------------------
+# 3D 가상 건물 시연 (/demo3d)
+#
+# 방마다 가상 센서 노드가 붙어 실제 ESP32 와 같은 경로로 측정값을 보내고
+# 제어 명령을 가져간다. 아래 프론트엔드 catch-all 보다 먼저 붙여야 한다.
+# ---------------------------------------------------------------------------
+_demo3d_dir = Path(__file__).resolve().parent / "static" / "demo3d"
+if (_demo3d_dir / "index.html").is_file():
+
+    @app.get("/demo3d", include_in_schema=False)
+    def demo3d_redirect():
+        # 슬래시 없이 들어오면 아래 프론트엔드 catch-all 이 가로채 대시보드가 뜬다.
+        # 페이지 안의 상대 경로(./demo3d.js)도 슬래시가 있어야 맞게 풀린다.
+        return RedirectResponse("/demo3d/")
+
+    app.mount("/demo3d", StaticFiles(directory=_demo3d_dir, html=True), name="demo3d")
 
 
 # ---------------------------------------------------------------------------
