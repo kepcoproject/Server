@@ -633,7 +633,7 @@ function buildWorld(spaces) {
 // 전체가 보이게 카메라를 맞춘다
 function frameAll(animate = true) {
   const box = new THREE.Box3().setFromObject(world);
-  if (box.isEmpty()) return;
+  if (box.isEmpty() || !Number.isFinite(camera.aspect) || camera.aspect <= 0) return;
   const center = box.getCenter(new THREE.Vector3());
   // 세로 화면에서는 정면에 가깝게 본다. 비스듬하면 건물이 한쪽으로 쏠린다.
   const dir = camera.aspect < 1
@@ -1260,14 +1260,30 @@ $("#t-view").addEventListener("click", () => {
 function fitViewport() {
   const w = window.innerWidth;
   const h = window.innerHeight;
+  // 숨은 창·접힌 패널에서 열리면 크기가 0 으로 들어온다. 그대로 쓰면 비율이
+  // 무한대가 되어 시점 계산이 망가진다. 제대로 된 크기가 들어올 때까지 기다린다.
+  if (w < 2 || h < 2) return false;
   camera.aspect = w / h;
   const top = document.querySelector(".topbar").getBoundingClientRect().bottom;
   camera.setViewOffset(w, h, 0, -Math.round(top / 2), w, h);
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   labelRenderer.setSize(w, h);
+  return true;
 }
-window.addEventListener("resize", fitViewport);
+
+// 창 크기가 바뀌면 시점도 다시 맞춘다. 페이지가 뜨던 순간의 크기로만 맞추면,
+// 시연 중에 F11 로 전체 화면을 켜거나 프로젝터 해상도가 바뀌었을 때 건물이
+// 엉뚱하게 작거나 잘려 보인다.
+let refitTimer = null;
+window.addEventListener("resize", () => {
+  if (!fitViewport()) return;
+  clearTimeout(refitTimer);
+  refitTimer = setTimeout(() => {
+    if (state.selected) focusRoom(state.selected);
+    else frameAll(false);
+  }, 150);
+});
 fitViewport();
 
 // ---------------------------------------------------------------------------
