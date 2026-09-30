@@ -255,6 +255,15 @@ def test_node_can_be_deleted_then_space_deletes():
         assert client.delete(f"/spaces/{target['spaceId']}", headers=headers).status_code == 200
         assert client.get(f"/spaces/{target['spaceId']}", headers=headers).status_code == 404
 
+    # 측정값도 남지 않아야 한다. 주인 없는 측정값은 리포트 합계에만 섞여 든다.
+    from app.models import SensorReading
+
+    db = SessionLocal()
+    try:
+        assert db.query(SensorReading).filter_by(device_id="KEEP-NODE-810").count() == 0
+    finally:
+        db.close()
+
 
 # ---------------------------------------------------------------------------
 # 디바이스 · 제어 · 리포트

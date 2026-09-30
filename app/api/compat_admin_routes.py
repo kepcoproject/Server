@@ -297,6 +297,11 @@ def compat_delete_device(
     if meta is not None:
         db.delete(meta)
 
+    # 측정값은 한 번에 지운다. cascade 에 맡기면 수만 건을 하나씩 읽어 와서 지우느라
+    # 5초 간격으로 며칠 보낸 노드는 삭제 버튼을 누르고 한참 기다려야 한다.
+    db.query(SensorReading).filter(SensorReading.device_id == device_id).delete(
+        synchronize_session=False
+    )
     db.delete(device)
     db.commit()
     logger.info("[호환] 노드 삭제: %s", device_id)
