@@ -249,11 +249,14 @@ def poll_actuator(
     if space is None:
         return Response(status_code=204)
 
+    # 실패로 닫힌 명령은 없던 것으로 친다. 만료시킨 명령도 최신이기는 해서,
+    # 이걸 빼지 않으면 204 를 한 번 준 다음 폴링에서 결국 그 명령이 내려간다.
     command = (
         db.query(ControlCommand)
         .filter(
             ControlCommand.space_id == space.space_id,
             ControlCommand.action.ilike(actuator_type),
+            ControlCommand.status != "FAILED",
         )
         .order_by(desc(ControlCommand.created_at))
         .first()

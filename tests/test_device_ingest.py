@@ -218,6 +218,56 @@ def test_stale_pending_command_expires_instead_of_firing_late():
         status = client.get(f"/control/commands/{command_id}", headers=headers).json()["data"]
         assert status["status"] == "FAILED"
 
+        # 다음 폴링에서도 마찬가지다. 예전에는 실패로 닫은 명령이 그대로 최신이라
+        # 두 번째 폴링에 결국 내려갔다.
+        again = client.get("/api/spaces/4700/actuator/latest", params={"actuator_type": "light"})
+        assert again.status_code == 204
+
+
+def test_expired_command_keeps_the_last_delivered_state():
+    """만료된 명령을 건너뛰면 노드는 마지막으로 실제 전달된 상태를 계속 받는다."""
+    from datetime import timedelta
+
+    from app.utils import utcnow
+
+    poll = ("/api/spaces/4750/actuator/latest", {"actuator_type": "light"})
+    with TestClient(app) as client:
+        client.post("/api/sensors/data", json=_firmware_payload("node-fw-7", 4750))
+        headers = _login(client)
+
+        # ON 을 보내고 노드가 가져간다
+        turned_on = client.post(
+            "/control/commands",
+            headers=headers,
+            json={"spaceId": "sp-4750", "action": "LIGHT", "value": "ON"},
+        )
+        assert client.get(poll[0], params=poll[1]).json()["action"] == "on"
+
+        # 그 뒤에 OFF 를 보냈는데 노드가 한참 동안 가져가지 않았다
+        turned_off = client.post(
+            "/control/commands",
+            headers=headers,
+            json={"spaceId": "sp-4750", "action": "LIGHT", "value": "OFF"},
+        )
+        db = SessionLocal()
+        try:
+            # 순서는 그대로 두고(ON 이 먼저) 둘 다 과거로 옮긴다
+            for command_id, hours in (
+                (turned_on.json()["data"]["commandId"], 4),
+                (turned_off.json()["data"]["commandId"], 3),
+            ):
+                command = db.get(ControlCommand, command_id)
+                command.created_at = utcnow() - timedelta(hours=hours)
+            db.commit()
+        finally:
+            db.close()
+
+        assert client.get(poll[0], params=poll[1]).status_code == 204
+        # 만료된 OFF 가 아니라 마지막으로 전달된 ON 이 유지된다
+        after = client.get(poll[0], params=poll[1])
+        assert after.status_code == 200
+        assert after.json()["action"] == "on"
+
 
 def test_control_rejects_node_that_is_only_online_by_stale_data():
     """
