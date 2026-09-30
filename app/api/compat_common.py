@@ -110,13 +110,16 @@ def password_fingerprint(password_hash: str) -> str:
     return hashlib.sha256(f"pwd:{password_hash}".encode("utf-8")).hexdigest()[:16]
 
 
-def issue_token(kind: str, user_id: str, password_hash: str = "") -> str:
+def issue_token(
+    kind: str, user_id: str, password_hash: str = "", ttl: Optional[timedelta] = None
+) -> str:
     settings = get_settings()
-    ttl = (
-        timedelta(minutes=settings.auth_access_ttl_minutes)
-        if kind == "access"
-        else timedelta(days=settings.auth_refresh_ttl_days)
-    )
+    if ttl is None:
+        ttl = (
+            timedelta(minutes=settings.auth_access_ttl_minutes)
+            if kind == "access"
+            else timedelta(days=settings.auth_refresh_ttl_days)
+        )
     payload = {
         "u": user_id,
         "k": kind,
@@ -163,12 +166,38 @@ def decode_token(token: str, kind: str, password_hash: Optional[str] = None) -> 
 
 
 # ---------------------------------------------------------------------------
-# 일회용 토큰 (이메일 인증 · 비밀번호 재설정)
+# 회원가입 인증번호
+#
+# 가입 버튼을 누르기 전에 메일로 여섯 자리 번호를 보내 주소부터 확인한다.
+# 번호를 맞히면 "이 주소는 확인됐다"는 증표(EMAIL_TICKET 토큰)를 주고,
+# 가입 요청은 그 증표가 있어야 받는다.
+# ---------------------------------------------------------------------------
+EMAIL_TICKET = "email"
+
+
+def email_code_hash(email: str, code: str) -> str:
+    """
+    저장용 인증번호 값. 서버 키를 섞는다.
+
+    그냥 해시만 남기면 경우의 수가 백만 개뿐이라 DB 를 본 사람이 곧바로
+    번호를 되살린다.
+    """
+    message = f"code:{email.lower()}:{code}".encode("utf-8")
+    return hmac.new(_TOKEN_KEY, message, hashlib.sha256).hexdigest()
+
+
+def issue_email_ticket(email: str) -> str:
+    """인증을 마친 주소라는 증표. 가입 요청에 함께 싣는다."""
+    minutes = get_settings().email_ticket_ttl_minutes
+    return issue_token(EMAIL_TICKET, email.lower(), ttl=timedelta(minutes=minutes))
+
+
+# ---------------------------------------------------------------------------
+# 일회용 토큰 (비밀번호 재설정)
 #
 # 메일로 보내는 링크에는 원문을 싣고 DB 에는 해시만 남긴다. DB 를 볼 수 있는
 # 사람이 남의 비밀번호를 재설정하는 링크를 만들어낼 수 없어야 한다.
 # ---------------------------------------------------------------------------
-VERIFY_EMAIL = "VERIFY_EMAIL"
 RESET_PASSWORD = "RESET_PASSWORD"
 
 

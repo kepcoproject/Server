@@ -365,6 +365,7 @@ pytest -v
 | `AUTH_DEMO_ACCOUNT` | `false` | `demo/demo1234` 가 공개되면 안 된다 |
 | `AUTH_BOOTSTRAP_ADMIN_ID` / `_PASSWORD` | 팀 관리자 계정 | 첫 로그인 수단 |
 | `CORS_ORIGINS` | 프론트 주소 | `*` 는 아무 사이트나 API를 부를 수 있다 |
+| `SMTP_HOST` / `_USERNAME` / `_PASSWORD` | 메일 계정 (Gmail 앱 비밀번호) | 없으면 가입하려는 사람이 인증번호를 받을 수 없다 |
 
 `AUTH_SECRET` 은 이렇게 만든다.
 
@@ -379,9 +380,13 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | `MEMBER` | 조회만 — 대시보드, 리포트, 추천 목록, 공간·노드 목록 |
 | `ADMIN` | 위 전부 + 공간 등록·수정·삭제, 노드 등록, 기기 제어, 추천 적용·반려, 사용자 승인 |
 
-회원가입은 `PENDING` 으로 들어가고 관리자가 승인해야 로그인된다.
+회원가입은 먼저 이메일로 받은 6자리 인증번호를 입력해야 하고(10분 유효, 5번 틀리면
+다시 받기), `PENDING` 으로 들어가 관리자가 승인해야 로그인된다.
 비밀번호는 PBKDF2-HMAC-SHA256(20만 회, 사용자별 소금)으로 저장하고,
 토큰은 서명과 만료 시각을 담는다.
+
+메일 설정(`SMTP_HOST`)이 없으면 인증번호를 보내지 않고 서버 로그에 남긴다.
+로컬에서 가입을 시험할 때는 콘솔에 찍힌 `인증번호 123456` 을 보고 입력하면 된다.
 
 ### 8.2 Render 로 올리기
 
@@ -399,6 +404,33 @@ PostgreSQL 을 쓰려면 `requirements.txt` 의 `psycopg2-binary` 주석을 풀�
 
 실물 센서를 붙이는 시연은 어차피 같은 네트워크여야 하므로, **클라우드 배포는
 "화면을 보여주는 용도", 현장 시연은 "노트북"** 으로 나누는 편이 단순하다.
+
+### 8.4 학교 서버에 올리기 (docker compose)
+
+화면과 API 를 한 주소에서 서빙한다. 비밀값은 `docker-compose.yml` 옆의 `.env` 에 넣는다
+(`.env` 는 git 에 올라가지 않는다). 값은 작은따옴표로 감싼다.
+
+```bash
+AUTH_SECRET='openssl rand -hex 32 로 만든 값'
+ADMIN_PASSWORD='관리자 비밀번호 (8자 이상)'
+PUBLIC_BASE_URL='http://서버주소:포트'
+SMTP_HOST='smtp.gmail.com'
+SMTP_USERNAME='보내는주소@gmail.com'
+SMTP_PASSWORD='앱 비밀번호 16자리'
+```
+
+```bash
+docker compose up -d --build
+```
+
+**Gmail 앱 비밀번호 만들기** — 계정 비밀번호로는 SMTP 로그인이 되지 않는다.
+
+1. 보낼 때 쓸 Google 계정에서 2단계 인증을 켠다 (개인 계정보다 팀용 계정을 권한다).
+2. https://myaccount.google.com/apppasswords 에서 앱 이름을 적고 만들기.
+3. 나온 16자리를 `SMTP_PASSWORD` 에 넣는다. 띄어쓰기는 있어도 없어도 된다.
+
+`ADMIN_PASSWORD` 는 `admin` 계정이 처음 만들어질 때만 쓰인다. DB 볼륨이 남아 있으면
+바꿔도 반영되지 않으니, 그때는 화면의 설정에서 바꾼다.
 
 ## 9. 현재 상태와 남은 과제
 

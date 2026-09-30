@@ -148,7 +148,7 @@ class AppUser(Base):
     status = Column(String, nullable=False, default="PENDING")  # ACTIVE | PENDING
     password_hash = Column(String, nullable=False, default="")
     requested_at = Column(DateTime, default=utcnow, nullable=False)
-    # 메일로 보낸 링크를 눌러 본인 주소임이 확인됐는지.
+    # 가입할 때 메일로 받은 인증번호를 맞혀 본인 주소임이 확인됐는지.
     # 비밀번호 재설정은 확인된 주소로만 보낸다 — 아무 주소나 적고 그 주소로
     # 재설정 링크를 받을 수 있으면 확인하는 의미가 없다.
     email_verified = Column(Boolean, nullable=False, default=False)
@@ -156,7 +156,7 @@ class AppUser(Base):
 
 class AuthToken(Base):
     """
-    이메일 인증 · 비밀번호 재설정에 쓰는 일회용 토큰.
+    비밀번호 재설정에 쓰는 일회용 토큰.
 
     원문은 저장하지 않고 해시만 둔다. DB 를 들여다볼 수 있는 사람이
     남의 비밀번호를 재설정하는 링크를 만들어낼 수 없어야 한다.
@@ -166,10 +166,33 @@ class AuthToken(Base):
 
     token_hash = Column(String, primary_key=True, index=True)
     user_id = Column(String, ForeignKey("app_users.user_id"), nullable=False, index=True)
-    purpose = Column(String, nullable=False, index=True)  # VERIFY_EMAIL | RESET_PASSWORD
+    purpose = Column(String, nullable=False, index=True)  # RESET_PASSWORD
     created_at = Column(DateTime, default=utcnow, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used_at = Column(DateTime, nullable=True)
+
+
+class EmailCode(Base):
+    """
+    회원가입 전에 메일로 보내는 6자리 인증번호.
+
+    아직 계정이 없으므로 사용자 대신 주소(소문자)에 묶는다. 번호는 여섯
+    자리뿐이라 해시만 남기면 DB 를 본 사람이 백만 번 대입해 금방 푼다.
+    그래서 서버 키로 서명한 값만 남긴다.
+
+    보낼 때마다 한 줄씩 쌓는다. 가장 최근 줄만 인증에 쓰고, 나머지는
+    1시간에 몇 번 보냈는지 셀 때 쓴다.
+    """
+
+    __tablename__ = "email_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String, nullable=False, index=True)
+    code_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    # 입력해 본 횟수. 한도에 닿으면 맞는 번호를 넣어도 받지 않는다.
+    attempts = Column(Integer, nullable=False, default=0)
 
 
 class ControlCommand(Base):

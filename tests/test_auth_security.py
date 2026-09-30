@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.api.compat_common import (
     decode_token,
     hash_password,
+    issue_email_ticket,
     issue_token,
     needs_rehash,
     verify_password,
@@ -149,6 +150,7 @@ def _member_headers(client):
             "password": "memberpw123",
             "name": "일반",
             "email": "member@example.com",
+            "emailToken": issue_email_ticket("member@example.com"),
         },
     )
     db = SessionLocal()

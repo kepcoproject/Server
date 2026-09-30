@@ -5,6 +5,18 @@
 #   http://서버:8080/client-api  -> 화면이 쓰는 API
 #   http://서버:8080/api         -> 센서 노드(ESP32)가 쓰는 API
 #
+# 비밀값(토큰 키, 관리자 비밀번호, Gmail 앱 비밀번호)은 이 파일에 적지 않는다.
+# 이 파일 옆에 .env 를 만들어 넣는다. .env 는 git 에 올라가지 않는다 (.gitignore).
+#
+#   AUTH_SECRET='긴 임의 문자열'        # 만들기: openssl rand -hex 32
+#   ADMIN_PASSWORD='관리자 비밀번호'    # 8자 이상
+#   PUBLIC_BASE_URL='http://서버주소:포트'
+#   SMTP_HOST='smtp.gmail.com'          # 아래 넷은 메일을 보낼 때만
+#   SMTP_USERNAME='보내는주소@gmail.com'
+#   SMTP_PASSWORD='앱 비밀번호 16자리'
+#
+# 값은 작은따옴표로 감쌀 것. $ 나 # 가 들어간 비밀번호가 잘리지 않는다.
+#
 # 실행:  docker compose up -d --build
 # 확인:  curl http://localhost:8080/health
 
@@ -37,34 +49,36 @@ services:
       COMPAT_API_ENABLED: "true"
       FRONTEND_DIR: web
 
-      # 토큰 서명 키. 비워두면 재시작할 때마다 로그인이 전부 풀린다.
-      # 반드시 길고 예측 불가능한 값으로 바꿀 것.
-      AUTH_SECRET: 여기를_긴_랜덤_문자열로_바꾸세요
+      # 토큰 서명 키. 비어 있으면 재시작할 때마다 로그인이 전부 풀린다.
+      # .env 에 없으면 기동하지 않고 여기 적힌 문구로 멈춘다.
+      AUTH_SECRET: ${AUTH_SECRET:?.env 에 AUTH_SECRET 을 넣으세요}
 
-      # 공개 서버이므로 demo 계정은 끄고 관리자 계정을 직접 만든다
+      # 공개 서버이므로 demo 계정은 끄고 관리자 계정을 직접 만든다.
+      # 이 비밀번호는 admin 계정이 처음 만들어질 때 한 번만 쓰인다. 나중에 바꾸려면
+      # 화면의 설정에서 바꿀 것 (여기를 바꿔도 이미 있는 계정에는 반영되지 않는다).
       AUTH_DEMO_ACCOUNT: "false"
       AUTH_BOOTSTRAP_ADMIN_ID: admin
-      AUTH_BOOTSTRAP_ADMIN_PASSWORD: 8자이상_비밀번호로_바꾸세요
+      AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?.env 에 ADMIN_PASSWORD 를 넣으세요}
 
       # 화면을 같은 주소에서 주므로 교차 출처 요청이 없다. 필요해지면 도메인을 적을 것.
       CORS_ORIGINS: "*"
 
-      # ---- 메일 (비밀번호 찾기 · 이메일 인증) ----
-      # 여기를 비워두면 메일을 보내지 않고 링크를 컨테이너 로그에만 남긴다.
-      # 확인:  docker compose logs backend | grep -A6 "SMTP 미설정"
-      # 그 상태로도 흐름은 전부 동작하지만, 사용자는 링크를 받을 수 없다.
+      # ---- 메일 (회원가입 인증번호 · 비밀번호 찾기) ----
+      # .env 에 SMTP_HOST 가 없으면 메일을 보내지 않고 내용을 컨테이너 로그에만 남긴다.
+      # 확인:  docker compose logs backend | grep -A8 "SMTP 미설정"
+      # 그 상태로는 가입하려는 사람이 인증번호를 받을 수 없다.
       #
       # Gmail 을 쓴다면 2단계 인증을 켠 뒤 "앱 비밀번호" 를 만들어 넣을 것.
-      # 계정 비밀번호로는 로그인되지 않는다.
-      # SMTP_HOST: smtp.gmail.com
-      # SMTP_PORT: "587"
-      # SMTP_USERNAME: 보내는주소@gmail.com
-      # SMTP_PASSWORD: 앱_비밀번호_16자리
-      # SMTP_FROM: 보내는주소@gmail.com
+      # 계정 비밀번호로는 로그인되지 않는다. 보내는 주소는 SMTP_USERNAME 이 된다.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
 
       # 메일 본문에 넣을 링크의 앞부분. 사용자가 브라우저로 여는 주소여야 한다.
       # 비워두면 요청 주소에서 유추하는데, 프록시 뒤에서는 틀린 주소가 나간다.
-      PUBLIC_BASE_URL: http://service.gsmsv.site:33141
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
 
       # 컨테이너 안에 브로커가 없다. ESP32는 HTTP(/api/sensors/data)로 붙인다.
       # MQTT를 쓰려면 mosquitto 서비스를 추가하고 MQTT_HOST를 그 이름으로 지정할 것.

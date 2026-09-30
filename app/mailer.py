@@ -1,9 +1,9 @@
 """
 메일 발송.
 
-이메일 인증과 비밀번호 재설정 링크를 보낸다.
+회원가입 인증번호와 비밀번호 재설정 링크를 보낸다.
 
-SMTP 설정이 비어 있으면 보내지 않고 링크를 로그에 남긴다. 학교 서버처럼 바깥
+SMTP 설정이 비어 있으면 보내지 않고 내용을 로그에 남긴다. 학교 서버처럼 바깥
 메일 포트가 막혀 있거나 계정이 아직 없는 환경에서도 흐름을 확인할 수 있어야
 하기 때문이다. 공개 배포에서는 반드시 SMTP_HOST 부터 채울 것.
 """
@@ -43,7 +43,8 @@ def _send(to_address: str, subject: str, body: str) -> bool:
 
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = formataddr((settings.smtp_from_name, settings.smtp_from))
+    sender = settings.smtp_from or settings.smtp_username or "no-reply@smart-energy.local"
+    message["From"] = formataddr((settings.smtp_from_name, sender))
     message["To"] = to_address
     message.set_content(body)
 
@@ -64,30 +65,36 @@ def _send(to_address: str, subject: str, body: str) -> bool:
                 if settings.smtp_use_tls:
                     client.starttls(context=ssl.create_default_context())
                 _login_and_send(client, message)
-        logger.info("메일 발송: %s (%s)", to_address, subject)
+        # 제목은 남기지 않는다. 인증번호가 들어 있다.
+        logger.info("메일 발송: %s", to_address)
         return True
     except Exception:
-        # 주소를 남기되 본문은 남기지 않는다 (토큰이 들어 있다).
+        # 주소를 남기되 본문은 남기지 않는다 (인증번호·재설정 토큰이 들어 있다).
         logger.exception("메일 발송 실패: %s", to_address)
         return False
 
 
 def _login_and_send(client: smtplib.SMTP, message: EmailMessage) -> None:
     if settings.smtp_username:
-        client.login(settings.smtp_username, settings.smtp_password or "")
+        password = settings.smtp_password or ""
+        # Gmail 앱 비밀번호는 "abcd efgh ijkl mnop" 처럼 띄어서 보여 준다.
+        # 그대로 붙여 넣는 경우가 많은데 공백이 있으면 로그인이 거절된다.
+        if (settings.smtp_host or "").endswith("gmail.com"):
+            password = password.replace(" ", "")
+        client.login(settings.smtp_username, password)
     client.send_message(message)
 
 
-def send_verification(to_address: str, name: str, link: str) -> bool:
-    hours = settings.email_verify_ttl_hours
+def send_signup_code(to_address: str, code: str) -> bool:
+    minutes = settings.email_code_ttl_minutes
     return _send(
         to_address,
-        "[스마트 에너지 절약 시스템] 이메일 인증",
-        f"{name}님, 안녕하세요.\n\n"
-        f"아래 주소를 열면 이메일 인증이 끝납니다.\n\n"
-        f"{link}\n\n"
-        f"이 링크는 {hours}시간 동안만 쓸 수 있습니다.\n"
-        f"가입한 적이 없다면 이 메일은 무시하셔도 됩니다.\n",
+        # 제목에도 번호를 넣는다. 휴대폰 알림만 보고 바로 입력할 수 있다.
+        f"[스마트 에너지 절약 시스템] 인증번호 {code}",
+        f"회원가입 화면에 아래 인증번호를 입력하세요.\n\n"
+        f"    {code}\n\n"
+        f"이 번호는 {minutes}분 동안만 쓸 수 있습니다.\n"
+        f"가입하려던 적이 없다면 이 메일은 무시하셔도 됩니다.\n",
     )
 
 

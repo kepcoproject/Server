@@ -3,6 +3,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from app.api.compat_common import issue_email_ticket
 from app.database import SessionLocal, init_db
 from app.main import app
 from app.mqtt_handlers import handle_data_message
@@ -91,6 +92,7 @@ def test_signup_creates_pending_user_and_cannot_login():
                 "password": "pw12345678",
                 "name": "신규",
                 "email": "n@x.io",
+                "emailToken": issue_email_ticket("n@x.io"),
             },
         )
         assert resp.status_code == 200
@@ -108,6 +110,7 @@ def test_signup_creates_pending_user_and_cannot_login():
                 "password": "pw12345678",
                 "name": "신규",
                 "email": "n@x.io",
+                "emailToken": issue_email_ticket("n@x.io"),
             },
         )
         assert dup.status_code == 409
@@ -376,6 +379,7 @@ def test_user_list_and_approval():
                 "password": "pw12345678",
                 "name": "대기",
                 "email": "pending@example.com",
+                "emailToken": issue_email_ticket("pending@example.com"),
             },
         )
 
@@ -406,7 +410,7 @@ def test_admin_cannot_demote_self():
 def test_signup_requires_every_field():
     """
     화면에서도 막지만 서버가 다시 봐야 한다. API 를 직접 부르면 화면 검증을 건너뛴다.
-    프론트(Signup.jsx)가 보내는 다섯 필드를 모두 필수로 본다.
+    프론트(Signup.jsx)가 보내는 다섯 필드와 이메일 인증 증표를 모두 필수로 본다.
     """
     ok_body = {
         "loginId": "validuser",
@@ -414,6 +418,7 @@ def test_signup_requires_every_field():
         "passwordConfirm": "password123",
         "name": "홍길동",
         "email": "hong@example.com",
+        "emailToken": issue_email_ticket("hong@example.com"),
     }
 
     cases = [
@@ -435,6 +440,12 @@ def test_signup_requires_every_field():
             assert resp.status_code == 400, f"{label}: 통과되면 안 된다"
             assert resp.json()["error"]["code"] == "E4000", label
 
+        # 이메일 인증을 건너뛰면 안 된다. 화면은 E4004 를 보고 인증을 다시 받게 한다.
+        no_ticket = {k: v for k, v in ok_body.items() if k != "emailToken"}
+        resp = client.post("/auth/signup", json=no_ticket)
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "E4004"
+
         # 다 채우면 통과한다
         resp = client.post("/auth/signup", json=ok_body)
         assert resp.status_code == 200
@@ -452,6 +463,7 @@ def test_signup_stores_name_and_email_as_given():
                 "passwordConfirm": "password123",
                 "name": "김철수",
                 "email": "chulsoo@example.com",
+                "emailToken": issue_email_ticket("chulsoo@example.com"),
             },
         )
         headers = _login(client)
@@ -520,35 +532,32 @@ def test_bad_number_fields_return_400_not_500():
 
 def test_email_can_only_be_used_once():
     """이메일 1개당 계정 1개. 대소문자만 다른 주소도 같은 주소로 본다."""
-    base = {
-        "password": "password123",
-        "passwordConfirm": "password123",
-        "name": "홍길동",
-    }
+    def body(login_id, email):
+        return {
+            "loginId": login_id,
+            "email": email,
+            "emailToken": issue_email_ticket(email),
+            "password": "password123",
+            "passwordConfirm": "password123",
+            "name": "홍길동",
+        }
+
     with TestClient(app) as client:
-        first = client.post(
-            "/auth/signup", json={**base, "loginId": "mailowner", "email": "one@example.com"}
-        )
+        first = client.post("/auth/signup", json=body("mailowner", "one@example.com"))
         assert first.status_code == 200
 
         # 같은 주소
-        dup = client.post(
-            "/auth/signup", json={**base, "loginId": "mailthief", "email": "one@example.com"}
-        )
+        dup = client.post("/auth/signup", json=body("mailthief", "one@example.com"))
         assert dup.status_code == 409
         assert dup.json()["error"]["code"] == "E4090"
         assert "이메일" in dup.json()["error"]["message"]
 
         # 대소문자만 다른 주소도 같은 것으로 본다
-        cased = client.post(
-            "/auth/signup", json={**base, "loginId": "mailcase", "email": "One@Example.COM"}
-        )
+        cased = client.post("/auth/signup", json=body("mailcase", "One@Example.COM"))
         assert cased.status_code == 409
 
         # 다른 주소는 통과한다
-        other = client.post(
-            "/auth/signup", json={**base, "loginId": "mailother", "email": "two@example.com"}
-        )
+        other = client.post("/auth/signup", json=body("mailother", "two@example.com"))
         assert other.status_code == 200
 
         headers = _login(client)

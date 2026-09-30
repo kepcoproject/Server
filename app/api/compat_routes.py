@@ -15,8 +15,10 @@ Bearer 토큰을 싣는다. 이 모듈은 기존 /api/* 를 그대로 둔 채 �
 
 공간·디바이스·사용자·제어·리포트는 compat_admin_routes.py 에 있다.
 """
+import hmac
 import logging
 import re
+import secrets
 import uuid
 from datetime import timedelta
 from typing import Any, Dict, Optional
@@ -32,6 +34,7 @@ from ..models import (
     AppUser,
     Device,
     DeviceStatusEnum,
+    EmailCode,
     Notification,
     OccupancyProbability,
     RecommendationState,
@@ -39,13 +42,15 @@ from ..models import (
 )
 from ..utils import utcnow
 from .compat_common import (
+    EMAIL_TICKET,
     RESET_PASSWORD,
-    VERIFY_EMAIL,
     CompatError,
     consume_auth_token,
     data_anchor,
     decode_token,
+    email_code_hash,
     ensure_seed_users,
+    issue_email_ticket,
     issue_token,
     needs_rehash,
     verify_password,
@@ -170,15 +175,14 @@ def compat_me(user: AppUser = Depends(require_user)):
 
 
 @router.post("/auth/signup", summary="[호환] 회원가입 (A-05)")
-async def compat_signup(
-    payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
-):
+async def compat_signup(payload: Dict[str, Any], db: Session = Depends(get_db)):
     body = payload or {}
     login_id = _text(body, "loginId", "아이디")
     password = _text(body, "password", "비밀번호", strip=False)
     password_confirm = _optional_text(body, "passwordConfirm", "비밀번호 확인")
     name = _text(body, "name", "이름")
     email = _text(body, "email", "이메일")
+    email_token = _text(body, "emailToken", "이메일 인증")
 
     # 화면에서도 막지만 서버에서 다시 본다. API 를 직접 호출하면 화면 검증을 건너뛸 수 있다.
     if not login_id:
@@ -204,6 +208,15 @@ async def compat_signup(
     if password_confirm is not None and password != password_confirm:
         raise CompatError(400, "E4000", "비밀번호가 서로 다릅니다")
 
+    # 인증번호를 맞힌 주소만 받는다. 화면은 E4004 를 보면 인증을 처음부터 다시 받게 한다.
+    if not email_token:
+        raise CompatError(400, "E4004", "이메일 인증을 먼저 해 주세요")
+    verified_email = decode_token(email_token, EMAIL_TICKET)
+    if verified_email is None:
+        raise CompatError(400, "E4004", "이메일 인증 시간이 지났습니다. 다시 인증해 주세요")
+    if verified_email != email.lower():
+        raise CompatError(400, "E4004", "인증한 이메일과 입력한 이메일이 다릅니다")
+
     if db.query(AppUser).filter_by(login_id=login_id).first():
         raise CompatError(409, "E4090", "이미 사용 중인 아이디입니다")
 
@@ -225,32 +238,146 @@ async def compat_signup(
         # 가입은 즉시 사용이 아니라 관리자 승인 대기 상태로 들어간다.
         status="PENDING",
         password_hash=hash_password(password),
+        # 위에서 인증번호로 확인한 주소다
+        email_verified=True,
     )
     db.add(user)
     db.commit()
 
-    # 인증 메일을 보낸다. 메일 서버가 죽어 있어도 가입 자체는 성공시킨다 —
-    # 인증은 나중에 다시 보낼 수 있고, 여기서 실패시키면 계정만 사라진다.
-    _send_verification(db, request, user)
-
     logger.info("[호환] 회원가입 신청: %s", login_id)
+    return ok({"userId": user.user_id, "status": user.status, "emailVerified": True})
+
+
+# ---------------------------------------------------------------------------
+# 회원가입 인증번호
+#
+# 가입 버튼을 누르기 전에 주소부터 확인한다. 메일로 보낸 여섯 자리 번호를
+# 맞히면 증표(emailToken)를 주고, 가입 요청은 그 증표가 있어야 받는다.
+# 그래서 가입한 계정의 이메일은 모두 본인이 실제로 받아 본 주소다.
+#
+# 메일을 보내는 경로는 async 가 아닌 def 로 둔다. SMTP 는 몇 초씩 걸리는데
+# async 안에서 기다리면 그동안 서버 전체가 멈춘다. def 는 별도 스레드에서 돈다.
+# ---------------------------------------------------------------------------
+SIGNUP_CODE_PATTERN = re.compile(r"\d{6}")
+
+
+@router.post("/auth/email/code", summary="[호환] 회원가입 인증번호 보내기")
+def compat_send_email_code(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    email = _text(payload or {}, "email", "이메일")
+    if not email:
+        raise CompatError(400, "E4000", "이메일을 입력하세요")
+    if not EMAIL_PATTERN.fullmatch(email):
+        raise CompatError(400, "E4000", "이메일 형식이 올바르지 않습니다")
+    key = email.lower()
+
+    # 가입 버튼에서도 같은 이유로 알려 준다. 여기서 숨겨도 거기서 드러난다.
+    if db.query(AppUser).filter(func.lower(AppUser.email) == key).first():
+        raise CompatError(409, "E4090", "이미 가입된 이메일입니다")
+
+    now = utcnow()
+    db.query(EmailCode).filter(EmailCode.created_at < now - timedelta(days=1)).delete()
+
+    # 남의 주소로 메일을 퍼붓는 데 쓰이지 않게 간격과 횟수를 제한한다
+    recent = (
+        db.query(EmailCode)
+        .filter(EmailCode.email == key, EmailCode.created_at > now - timedelta(hours=1))
+        .order_by(EmailCode.created_at.desc())
+        .all()
+    )
+    if recent:
+        elapsed = (now - recent[0].created_at).total_seconds()
+        wait = settings.email_code_resend_seconds - int(elapsed)
+        if wait > 0:
+            raise CompatError(429, "E4290", f"{wait}초 뒤에 다시 받을 수 있습니다")
+    if len(recent) >= settings.email_code_hourly_limit:
+        raise CompatError(
+            429, "E4290", "인증번호를 너무 여러 번 요청했습니다. 1시간 뒤에 다시 시도하세요"
+        )
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    row = EmailCode(
+        email=key,
+        code_hash=email_code_hash(key, code),
+        created_at=now,
+        expires_at=now + timedelta(minutes=settings.email_code_ttl_minutes),
+    )
+    db.add(row)
+    db.commit()
+
+    # SMTP 를 설정해 두고도 못 보냈으면 알려야 한다. 번호를 받지 못하면 가입을
+    # 진행할 수 없다. (설정이 없으면 로그에 남기고 넘어간다)
+    if not mailer.send_signup_code(email, code) and mailer.is_configured():
+        # 보내지도 못한 번호 때문에 재전송 대기에 걸리면 안 된다
+        db.delete(row)
+        db.commit()
+        raise CompatError(
+            503, "E5030", "인증 메일을 보내지 못했습니다. 잠시 후 다시 시도하세요"
+        )
+
+    logger.info("[호환] 회원가입 인증번호 발송: %s", key)
     return ok(
         {
-            "userId": user.user_id,
-            "status": user.status,
-            "emailVerified": False,
-            # 화면이 "메일을 확인하세요" 를 띄울지 판단하는 값
-            "verificationSent": True,
+            "sent": True,
+            "expiresIn": settings.email_code_ttl_minutes * 60,
+            "resendAfter": settings.email_code_resend_seconds,
         }
     )
 
 
+@router.post("/auth/email/code/verify", summary="[호환] 회원가입 인증번호 확인")
+def compat_verify_email_code(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    body = payload or {}
+    key = _text(body, "email", "이메일").lower()
+    # 메일에서 복사하면 앞뒤나 가운데에 공백이 딸려 오기도 한다
+    code = re.sub(r"\s", "", _text(body, "code", "인증번호"))
+    if not key:
+        raise CompatError(400, "E4000", "이메일을 입력하세요")
+    if not SIGNUP_CODE_PATTERN.fullmatch(code):
+        raise CompatError(400, "E4000", "인증번호 6자리를 입력하세요")
+
+    # 가장 최근에 보낸 번호만 받는다. 다시 받았으면 앞의 번호는 끝이다.
+    row = (
+        db.query(EmailCode)
+        .filter(EmailCode.email == key)
+        .order_by(EmailCode.created_at.desc(), EmailCode.id.desc())
+        .first()
+    )
+    if row is None or row.expires_at < utcnow():
+        raise CompatError(400, "E4000", "인증번호가 만료되었습니다. 다시 받아 주세요")
+
+    # 비교하기 전에 기회를 하나 차감한다. 조건부 UPDATE 한 번이라 요청을
+    # 동시에 여러 개 보내도 한도보다 많이 시도할 수 없다.
+    limit = settings.email_code_max_attempts
+    claimed = (
+        db.query(EmailCode)
+        .filter(EmailCode.id == row.id, EmailCode.attempts < limit)
+        .update({EmailCode.attempts: EmailCode.attempts + 1}, synchronize_session=False)
+    )
+    db.commit()
+    if not claimed:
+        raise CompatError(400, "E4000", "입력 횟수를 넘었습니다. 인증번호를 다시 받아 주세요")
+
+    if not hmac.compare_digest(row.code_hash, email_code_hash(key, code)):
+        db.refresh(row)
+        left = limit - row.attempts
+        if left <= 0:
+            raise CompatError(
+                400, "E4000", "입력 횟수를 넘었습니다. 인증번호를 다시 받아 주세요"
+            )
+        raise CompatError(400, "E4000", f"인증번호가 틀렸습니다 (남은 횟수 {left}번)")
+
+    # 맞혔으면 번호는 버린다. 같은 번호로 증표를 또 받을 수 없다.
+    db.query(EmailCode).filter(EmailCode.email == key).delete()
+    db.commit()
+    logger.info("[호환] 회원가입 이메일 인증 완료: %s", key)
+    return ok({"verified": True, "emailToken": issue_email_ticket(key)})
+
+
 # ---------------------------------------------------------------------------
-# 이메일 인증 · 비밀번호 재설정
+# 비밀번호 재설정
 #
-# 두 기능은 한 쌍이다. 비밀번호를 잊으면 메일로 되찾는데, 그 메일 주소가
-# 본인 것이 아니면 남이 계정을 가져갈 수 있다. 그래서 재설정은 인증이 끝난
-# 주소로만 보낸다.
+# 비밀번호를 잊으면 메일로 되찾는다. 그 메일 주소가 본인 것이 아니면 남이
+# 계정을 가져갈 수 있으므로, 재설정은 인증이 끝난 주소로만 보낸다.
 # ---------------------------------------------------------------------------
 def _link(request: Request, path: str, token: str) -> str:
     """메일에 넣을 링크. 설정된 공개 주소가 있으면 그것을 쓴다."""
@@ -261,44 +388,8 @@ def _link(request: Request, path: str, token: str) -> str:
     return f"{base}{path}?token={token}"
 
 
-def _send_verification(db: Session, request: Request, user: AppUser) -> None:
-    token = issue_auth_token(
-        db, user, VERIFY_EMAIL, timedelta(hours=settings.email_verify_ttl_hours)
-    )
-    mailer.send_verification(user.email, user.name, _link(request, "/verify-email", token))
-
-
-@router.post("/auth/email/verify", summary="[호환] 이메일 인증 확인")
-async def compat_verify_email(payload: Dict[str, Any], db: Session = Depends(get_db)):
-    token = _text(payload or {}, "token", "인증 링크")
-    user = consume_auth_token(db, token, VERIFY_EMAIL)
-    if user is None:
-        raise CompatError(400, "E4000", "링크가 만료되었거나 이미 사용되었습니다")
-
-    user.email_verified = True
-    db.commit()
-    logger.info("[호환] 이메일 인증 완료: %s", user.login_id)
-    return ok({"verified": True, "loginId": user.login_id})
-
-
-@router.post("/auth/email/resend", summary="[호환] 인증 메일 다시 보내기")
-async def compat_resend_verification(
-    payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
-):
-    """
-    응답은 언제나 같다. 가입된 주소인지 알려주면 어떤 주소가 등록돼 있는지
-    확인하는 수단이 된다.
-    """
-    email = _text(payload or {}, "email", "이메일")
-    if email:
-        user = db.query(AppUser).filter(func.lower(AppUser.email) == email.lower()).first()
-        if user is not None and not user.email_verified:
-            _send_verification(db, request, user)
-    return ok({"sent": True})
-
-
 @router.post("/auth/password/forgot", summary="[호환] 비밀번호 재설정 요청")
-async def compat_forgot_password(
+def compat_forgot_password(
     payload: Dict[str, Any], request: Request, db: Session = Depends(get_db)
 ):
     """
@@ -306,6 +397,8 @@ async def compat_forgot_password(
 
     주소가 없든, 인증이 안 됐든, 메일 발송이 실패했든 응답은 같다.
     다르게 답하면 어떤 주소가 가입돼 있는지 알아내는 데 쓰인다.
+
+    메일을 보내므로 def 로 둔다 (위 인증번호 발송과 같은 이유).
     """
     ensure_seed_users(db)
     purge_expired_tokens(db)
